@@ -1,0 +1,284 @@
+{
+  "datasources": [
+    {
+      "calc_columns": [],
+      "calc_columns_stubbed": 0,
+      "calc_columns_translated": 0,
+      "column_count": 5,
+      "column_prune": null,
+      "connector": "sqlserver",
+      "dim_calcs": [],
+      "flatfile_landed": null,
+      "fully_supported": true,
+      "m_connector": "Sql.Database",
+      "manual_followups": [
+        "Configure connection credentials in Fabric (bind links IDs only).",
+        "If the source is on-premises, set up / select a data gateway for the connection."
+      ],
+      "measures": [
+        {
+          "dax": "SUM('Orders'[Sales_Amount])",
+          "measure": "Total Sales",
+          "reason": "ok",
+          "source": {
+            "calc_instance_token": "Calculation_1",
+            "field_caption": "Total Sales",
+            "intent": "measure",
+            "kind": "calc_column",
+            "model_table": "_Measures"
+          },
+          "status": "translated",
+          "tableau_formula": "SUM([Sales])"
+        },
+        {
+          "dax": "DIVIDE(SUM('Orders'[Profit]), SUM('Orders'[Sales_Amount]))",
+          "measure": "Profit Ratio",
+          "reason": "ok",
+          "source": {
+            "calc_instance_token": "Calculation_2",
+            "field_caption": "Profit Ratio",
+            "intent": "measure",
+            "kind": "calc_column",
+            "model_table": "_Measures"
+          },
+          "status": "translated",
+          "tableau_formula": "SUM([Profit]) / SUM([Sales])"
+        },
+        {
+          "dax": null,
+          "measure": "Running Sales",
+          "reason": "unsupported function RUNNING_SUM",
+          "source": {
+            "calc_instance_token": "Calculation_3",
+            "field_caption": "Running Sales",
+            "intent": "measure",
+            "kind": "calc_column",
+            "model_table": "_Measures"
+          },
+          "status": "stub",
+          "tableau_formula": "RUNNING_SUM(SUM([Sales]))"
+        }
+      ],
+      "measures_stubbed": 1,
+      "measures_translated": 2,
+      "name": "Superstore",
+      "output_folder": "semantic_models/Superstore.SemanticModel",
+      "partitions_needs_review": [],
+      "partitions_stubbed": 0,
+      "pbip_folder": "pbip/Superstore/Superstore.pbip",
+      "skipped_calcs": [],
+      "skipped_tables": [],
+      "source_id": "C:\\Users\\kwamesefah\\AppData\\Local\\Temp\\tfmig\\20260717-141149\\in\\Superstore.tds",
+      "status": "migrated",
+      "storage_decision": {
+        "connector": "Sql.Database",
+        "direct_upstream_available": false,
+        "fallback": null,
+        "fully_supported": true,
+        "manual_followups": [
+          "Configure connection credentials in Fabric (bind links IDs only).",
+          "If the source is on-premises, set up / select a data gateway for the connection."
+        ],
+        "mode": "DirectQuery",
+        "rationale": "Live sqlserver connection -> DirectQuery (live-to-live).",
+        "recommended_mode": "DirectQuery",
+        "score": 95,
+        "uses_native_query": false
+      },
+      "storage_mode": "DirectQuery",
+      "table_count": 2,
+      "tables": [
+        "Orders",
+        "Date"
+      ],
+      "translation_handoff": {
+        "needs_review": [
+          {
+            "category": "missing_addressing_intent",
+            "fallback_reason": "unsupported function RUNNING_SUM",
+            "has_suggestion": false,
+            "name": "Running Sales",
+            "role": "measure"
+          }
+        ],
+        "requests": [
+          {
+            "category": "missing_addressing_intent",
+            "category_guidance": "This is a table calculation whose partition/order/scope (Tableau 'Compute Using') is not carried by the .tds. Recover the addressing from worksheet context (the .twb 'ordering-type' + <order>/<sort> and the rows/cols shelf layout) when available, then emit the windowed DAX: cumulative -> running total or time-intelligence, prior value/offset -> OFFSET, rank -> RANKX over the partition, partition size/row number -> COUNTROWS/RANKX over ALLSELECTED. State the inferred partition + order for review; if addressing is unrecoverable, keep the stub.",
+            "fallback_reason": "unsupported function RUNNING_SUM",
+            "fields": [
+              {
+                "caption": "Sales",
+                "column": "Sales_Amount",
+                "kind": "field",
+                "table": "Orders",
+                "type": "double"
+              }
+            ],
+            "formula": "RUNNING_SUM(SUM([Sales]))",
+            "has_suggestion": false,
+            "name": "Running Sales",
+            "role": "measure",
+            "target_table": "_Measures"
+          }
+        ],
+        "summary": {
+          "assisted_approved": 0,
+          "assisted_suggested": 0,
+          "categories": {
+            "missing_addressing_intent": 1
+          },
+          "coverage_pct": 66.7,
+          "live": 2,
+          "needs_review": 1,
+          "stub": 1,
+          "total": 3,
+          "translated": 2
+        },
+        "triage": {
+          "cascadable": [],
+          "irreducible": {
+            "other": [
+              {
+                "category": "missing_addressing_intent",
+                "name": "Running Sales",
+                "role": "measure"
+              }
+            ]
+          },
+          "summary": {
+            "cascadable": 0,
+            "irreducible": 1,
+            "shapes": {
+              "other": 1
+            }
+          }
+        }
+      }
+    }
+  ],
+  "definition_of_done": {
+    "applicable": true,
+    "reports_bound": 0,
+    "reports_failed": 1,
+    "reports_warned": 0,
+    "status": "failed",
+    "workbooks": [
+      {
+        "bound_model": null,
+        "pbip_folder": null,
+        "reason": "embedded datasource 'Superstore' needs a storage decision (Connector class 'unknown' is not mapped for direct M; storage decision required -- default to a direct-to-source Import rebuild, or opt in to land-to-Delta + DirectLake (never auto-selected).) -- workbook .pbip skipped (model lands separately)",
+        "report_bound": false,
+        "status": "failed",
+        "workbook": "Superstore"
+      }
+    ],
+    "workbooks_total": 1
+  },
+  "fallbacks": [],
+  "generated_at": "2026-07-17T19:11:50Z",
+  "source": {
+    "kind": "LocalFilesSource",
+    "root": "C:\\Users\\kwamesefah\\AppData\\Local\\Temp\\tfmig\\20260717-141149\\in"
+  },
+  "summary": {
+    "calc_columns_stubbed": 0,
+    "calc_columns_total": 0,
+    "calc_columns_translated": 0,
+    "columns_pruned_hidden_total": 0,
+    "columns_translated": 5,
+    "connectors_seen": [
+      "sqlserver"
+    ],
+    "datasource_pbips_built": 0,
+    "datasource_pbips_total": 1,
+    "datasources_error": 0,
+    "datasources_fallback": 0,
+    "datasources_migrated": 1,
+    "datasources_partial": 0,
+    "datasources_total": 1,
+    "implicit_row_count_unbound": 0,
+    "measures_stubbed": 1,
+    "measures_total": 3,
+    "measures_translated": 2,
+    "needs_review_total": 1,
+    "partitions_stubbed_total": 0,
+    "storage_modes": {
+      "DirectQuery": 1,
+      "Import": 0,
+      "fallback": 0
+    },
+    "tables_translated": 2,
+    "visuals_rebuilt": 3,
+    "visuals_warned": 0,
+    "viz_stage_available": true,
+    "workbook_calcs_coverage_pct": null,
+    "workbook_calcs_needs_review": 0,
+    "workbook_calcs_stubbed": 0,
+    "workbook_calcs_total": 0,
+    "workbook_calcs_translated": 0,
+    "workbooks_embedded_ds": 1,
+    "workbooks_implicit_row_count": 0,
+    "workbooks_multi_datasource": 0,
+    "workbooks_pbip_built": 0,
+    "workbooks_published_ds": 0,
+    "workbooks_rebind_candidate": 0,
+    "workbooks_total": 1,
+    "workbooks_viz_built": 1,
+    "workbooks_viz_error": 0,
+    "workbooks_viz_warned": 0
+  },
+  "tool": "migrate_estate",
+  "workbooks": [
+    {
+      "binding_signal": {
+        "connection_class": null,
+        "kind": "embedded",
+        "note": "embedded datasource 'Superstore' -- rebuild the model from the workbook so it carries its calculated fields",
+        "primary_datasource": "Superstore",
+        "published_ds_name": null,
+        "recommendation": "rebuild_embedded",
+        "secondary_datasources": [],
+        "view_local_calcs": []
+      },
+      "bound_datasource": "Superstore",
+      "bound_model": null,
+      "model_translation_handoff": null,
+      "name": "Superstore",
+      "note": null,
+      "output_folder": "reports/Superstore_2.Report",
+      "pbip_folder": null,
+      "pbip_ref_drops": [],
+      "pbip_status": "skipped",
+      "pbip_warnings": [
+        "manual attention required: embedded datasource 'Superstore' needs a storage decision (Connector class 'unknown' is not mapped for direct M; storage decision required -- default to a direct-to-source Import rebuild, or opt in to land-to-Delta + DirectLake (never auto-selected).) -- workbook .pbip skipped (model lands separately)"
+      ],
+      "source_id": "C:\\Users\\kwamesefah\\AppData\\Local\\Temp\\tfmig\\20260717-141149\\in\\Superstore.twb",
+      "viz_fidelity": [
+        {
+          "reason": null,
+          "status": "rebuilt",
+          "tier": "rebuilt",
+          "visual_type": "column",
+          "worksheet": "Sales by Category"
+        },
+        {
+          "reason": null,
+          "status": "rebuilt",
+          "tier": "rebuilt",
+          "visual_type": "column",
+          "worksheet": "Profit by Region"
+        },
+        {
+          "reason": null,
+          "status": "rebuilt",
+          "tier": "rebuilt",
+          "visual_type": "line",
+          "worksheet": "Monthly Sales"
+        }
+      ],
+      "viz_implicit_row_count": 0,
+      "viz_status": "built"
+    }
+  ]
+}

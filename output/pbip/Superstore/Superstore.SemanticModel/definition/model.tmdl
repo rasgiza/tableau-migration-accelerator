@@ -1,0 +1,15 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["Server","Database"]
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+ref table Orders
+ref table Date
+ref table _Measures

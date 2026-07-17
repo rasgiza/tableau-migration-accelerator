@@ -1,0 +1,3 @@
+expression Server = "placeholder-store.database.windows.net" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+expression Database = "StoreDW" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]

@@ -1,0 +1,39 @@
+name: tests
+
+# Runs the full skills test suite (unit + integration + oracle-certified +
+# the canonical<->plugin mirror-parity guard) on every PR and every push to
+# main. The engine is stdlib-only, so the sole test dependency is pytest.
+# Pairs with version-bump-check.yml: that guards "did you bump VERSION?",
+# this guards "does the payload still work?". Mark both as required checks.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Byte-compile the engine (fast fail on syntax errors)
+        run: python -m compileall -q skills plugins
+
+      - name: Run the full skills test suite
+        run: python -m pytest skills -q

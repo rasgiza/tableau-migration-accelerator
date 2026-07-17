@@ -1,0 +1,54 @@
+table Orders
+
+	column Category
+		dataType: string
+		lineageTag: 56d60c6c-2b8c-4d8b-b634-40374a14431e
+		summarizeBy: none
+		sourceColumn: Category
+
+		annotation SummarizationSetBy = Automatic
+
+	column Region
+		dataType: string
+		lineageTag: 88c9b37d-7230-40e9-9031-ff8499f41896
+		summarizeBy: none
+		sourceColumn: Region
+
+		annotation SummarizationSetBy = Automatic
+
+	column Sales_Amount
+		dataType: double
+		formatString: #,0.00
+		lineageTag: c5ab0ff6-1a18-481f-a9b6-c51fb5aa70e9
+		summarizeBy: sum
+		sourceColumn: "Sales Amount"
+
+		annotation SummarizationSetBy = Automatic
+
+	column Profit
+		dataType: double
+		formatString: #,0.00
+		lineageTag: a40dce75-1d36-4ec1-b4c3-503a7e5f24a7
+		summarizeBy: sum
+		sourceColumn: Profit
+
+		annotation SummarizationSetBy = Automatic
+
+	column Order_Date
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 4c262966-a601-4f66-863f-b98880637b51
+		summarizeBy: none
+		sourceColumn: "Order Date"
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Orders = m
+		mode: directQuery
+		source =
+			let
+				Source = Sql.Database(#"Server", #"Database"),
+				Data = Source{[Schema="dbo", Item="Orders"]}[Data]
+			in
+				Data
+

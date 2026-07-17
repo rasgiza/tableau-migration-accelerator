@@ -1,0 +1,114 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<workbook source-build='2023.1' version='18.1'>
+  <datasources>
+    <datasource caption='Revenue Cycle Flat' inline='true' name='federated.revcycleflat' version='18.1'>
+      <connection class='federated'>
+        <relation name='ClaimsFlat' table='[dbo].[ClaimsFlat]' type='table' />
+        <metadata-records>
+          <metadata-record class='column'>
+            <remote-name>Payer</remote-name><local-name>[Payer]</local-name>
+            <parent-name>[ClaimsFlat]</parent-name><local-type>string</local-type>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>Service Line</remote-name><local-name>[Service Line]</local-name>
+            <parent-name>[ClaimsFlat]</parent-name><local-type>string</local-type>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>Department</remote-name><local-name>[Department]</local-name>
+            <parent-name>[ClaimsFlat]</parent-name><local-type>string</local-type>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>Charge Amount</remote-name><local-name>[Charge Amount]</local-name>
+            <parent-name>[ClaimsFlat]</parent-name><local-type>real</local-type>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>Paid Amount</remote-name><local-name>[Paid Amount]</local-name>
+            <parent-name>[ClaimsFlat]</parent-name><local-type>real</local-type>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>Denied Amount</remote-name><local-name>[Denied Amount]</local-name>
+            <parent-name>[ClaimsFlat]</parent-name><local-type>real</local-type>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>Service Date</remote-name><local-name>[Service Date]</local-name>
+            <parent-name>[ClaimsFlat]</parent-name><local-type>datetime</local-type>
+          </metadata-record>
+        </metadata-records>
+      </connection>
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='Charges by Payer'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Revenue Cycle Flat' name='federated.revcycleflat' />
+          </datasources>
+          <datasource-dependencies datasource='federated.revcycleflat'>
+            <column caption='Payer' datatype='string' name='[Payer]' role='dimension' type='nominal' />
+            <column caption='Service Line' datatype='string' name='[Service Line]' role='dimension' type='nominal' />
+            <column caption='Department' datatype='string' name='[Department]' role='dimension' type='nominal' />
+            <column caption='Charge Amount' datatype='real' name='[Charge Amount]' role='measure' type='quantitative' />
+            <column caption='Paid Amount' datatype='real' name='[Paid Amount]' role='measure' type='quantitative' />
+            <column caption='Denied Amount' datatype='real' name='[Denied Amount]' role='measure' type='quantitative' />
+            <column caption='Total Charges' datatype='real' name='[Calculation_01]' role='measure' type='quantitative'>
+              <calculation class='tableau' formula='SUM([Charge Amount])' />
+            </column>
+            <column-instance column='[Payer]' derivation='None' name='[none:Payer:nk]' pivot='key' type='nominal' />
+            <column-instance column='[Service Line]' derivation='None' name='[none:Service Line:nk]' pivot='key' type='nominal' />
+            <column-instance column='[Charge Amount]' derivation='Sum' name='[sum:Charge Amount:qk]' pivot='key' type='quantitative' />
+            <column-instance column='[Paid Amount]' derivation='Sum' name='[sum:Paid Amount:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+        </view>
+        <panes><pane><mark class='Bar' /></pane></panes>
+        <rows>[federated.revcycleflat].[sum:Charge Amount:qk]</rows>
+        <cols>[federated.revcycleflat].[none:Payer:nk]</cols>
+      </table>
+    </worksheet>
+    <worksheet name='Paid by Service Line'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Revenue Cycle Flat' name='federated.revcycleflat' />
+          </datasources>
+          <datasource-dependencies datasource='federated.revcycleflat'>
+            <column caption='Service Line' datatype='string' name='[Service Line]' role='dimension' type='nominal' />
+            <column caption='Paid Amount' datatype='real' name='[Paid Amount]' role='measure' type='quantitative' />
+            <column-instance column='[Service Line]' derivation='None' name='[none:Service Line:nk]' pivot='key' type='nominal' />
+            <column-instance column='[Paid Amount]' derivation='Sum' name='[sum:Paid Amount:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+        </view>
+        <panes><pane><mark class='Bar' /></pane></panes>
+        <rows>[federated.revcycleflat].[sum:Paid Amount:qk]</rows>
+        <cols>[federated.revcycleflat].[none:Service Line:nk]</cols>
+      </table>
+    </worksheet>
+    <worksheet name='Collections Trend'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Revenue Cycle Flat' name='federated.revcycleflat' />
+          </datasources>
+          <datasource-dependencies datasource='federated.revcycleflat'>
+            <column caption='Total Charges' datatype='real' name='[Calculation_01]' role='measure' type='quantitative'>
+              <calculation class='tableau' formula='SUM([Charge Amount])' />
+            </column>
+            <column caption='Service Date' datatype='datetime' name='[Service Date]' role='dimension' type='ordinal' />
+          </datasource-dependencies>
+        </view>
+        <panes><pane><mark class='line' /></pane></panes>
+        <rows>[federated.revcycleflat].[Calculation_01]</rows>
+        <cols>[federated.revcycleflat].[Service Date]</cols>
+      </table>
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name='Revenue Cycle Exec'>
+      <size maxheight='800' maxwidth='1000' />
+      <zones>
+        <zone name='Charges by Payer' x='0' y='0' w='500' h='800' />
+        <zone name='Paid by Service Line' x='500' y='0' w='500' h='800' />
+      </zones>
+    </dashboard>
+  </dashboards>
+</workbook>

@@ -1,0 +1,34 @@
+table _Measures
+	lineageTag: 172c76ff-fdc9-4bd3-bafa-48286c463fbe
+
+	column Value
+		dataType: string
+		isHidden
+		lineageTag: d0d435df-2b45-45c2-a6d0-420aaf08f369
+		summarizeBy: none
+		sourceColumn: [Value]
+		type: calculatedTableColumn
+
+	measure 'Total Sales' = SUM('Orders'[Sales_Amount])
+		lineageTag: dfbd3b8f-21cd-493f-a57e-e139d7ffb66b
+		annotation TableauFormula = SUM([Sales])
+		annotation TranslatedBy = deterministic
+		annotation SummarizationSetBy = Automatic
+
+	measure 'Profit Ratio' = DIVIDE(SUM('Orders'[Profit]), SUM('Orders'[Sales_Amount]))
+		lineageTag: b64b5813-c5bb-4fe1-842e-5662ea208055
+		annotation TableauFormula = SUM([Profit]) / SUM([Sales])
+		annotation TranslatedBy = deterministic
+		annotation SummarizationSetBy = Automatic
+
+	measure 'Running Sales' = 0
+		lineageTag: b89dcc32-26ab-4aec-8db3-d37aabbbd2b6
+		annotation TableauFormula = RUNNING_SUM(SUM([Sales]))
+		annotation SummarizationSetBy = Automatic
+
+	partition _Measures = calculated
+		mode: import
+		source = Row("Value", BLANK())
+
+	annotation PBI_Id = _Measures
+
