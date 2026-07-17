@@ -69,6 +69,15 @@ workbook produced a typed TMDL model, auto-translated 2 of 3 measures to DAX
 (including choosing `DIVIDE` for safe division), preserved the untranslatable table calc as
 an annotated stub, and emitted an openable `.pbip`.
 
+**On the visuals (not just the model):** the engine also reads each dashboard's viz grammar
+and rebuilds **native, live Power BI visuals** — bar/column, line, area, combo, table, matrix,
+pie, scatter, maps, cards, and slicers — bound to the migrated model, with canvas size and zone
+layout mapped. It does *not* image-convert or screenshot a dashboard. Exotic marks (treemap,
+packed bubbles, polygons), exact formatting (fonts/colors/tooltips), and filter-scope semantics
+are deferred to a structured warning, and a separately-authored `fidelity_oracle` scores every
+visual 0..1 so reviewers get a punch-list, never a silent guess. The data model is high-fidelity;
+the report layer is a faithful structural rebuild that a designer refines.
+
 ## Q3 — Has anyone supported a large Tableau migration (100+ workbooks), and what are the lessons learned?
 
 Patterns that hold for a 150-workbook estate (and are baked into this accelerator):

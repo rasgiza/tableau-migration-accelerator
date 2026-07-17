@@ -56,6 +56,7 @@ Requirements: Windows PowerShell + **Python 3.11+** (the script auto-detects
 | `docs/customer-response.md` | Honest answers to the customer's 5 questions. |
 | `docs/architecture.md` | Reference architecture + the two migration motions + phased Revenue-Cycle-first plan. |
 | `docs/assessment-methodology.md` | How to size a 150-workbook estate and estimate effort. |
+| `engine/skills/tableau-migration/resources/viz-rebuild.md` | The visual layer: which Tableau chart types rebuild into which Power BI visuals, and what is deferred to a warning. |
 
 ## The offline proof (what actually ran)
 
@@ -77,6 +78,28 @@ The engine parsed a Superstore datasource + workbook **entirely offline** and pr
 
 This is the honest headline: **the boring, error-prone 80% is automated and auditable;
 the judgement 20% is surfaced, never silently guessed.**
+
+## What happens to my dashboards & visuals?
+
+The tool does **not** screenshot or image-convert a dashboard. It reads the dashboard's
+underlying **viz grammar** (the workbook XML — marks, shelves, encodings, filters, and zone
+layout) and rebuilds **native, live Power BI visuals** bound to the migrated model. You get an
+interactive `.pbip` report, not a flat picture. Fidelity splits into two layers:
+
+| Layer | What it covers | Fidelity |
+|---|---|---|
+| **Semantic model** (data + calcs) | Types, tables, relationships, safe calc→DAX. **The deliverable.** | High — typed TMDL, deterministic |
+| **Report / visuals** | Chart types, field bindings, dashboard layout | Structural — faithful for the supported set; polish expected |
+
+**Chart types rebuilt faithfully** (see [viz-rebuild.md](engine/skills/tableau-migration/resources/viz-rebuild.md) for the full mapping table): bar/column (incl. stacked), line, area, dual-axis combo, table, matrix/highlight table, pie, scatter, filled/point maps, cards, and slicers. Dashboard canvas size and zone positions are mapped, and axis sorts are preserved when the sort measure is bound.
+
+**Deferred to a structured warning (never guessed wrong):** exotic marks (treemap, packed bubbles, polygons, Gantt), exact formatting (fonts, colors, tooltips, conditional formatting), filter-scope semantics (a Tableau filter card ≠ a Power BI slicer), reference lines, annotations, and dashboard actions. These are surfaced for a human to finish.
+
+**Every visual is scored.** The `fidelity_oracle` is a separately-authored second opinion that re-reads both sides from disk and reports a per-visual 0..1 agreement across four components — chart-type family, field bindings, role split (axis vs. value), and dashboard layout position — so you get a punch-list of exactly which visuals matched and which need hand-finishing, rather than a guess.
+
+Bottom line: it removes the mechanical rebuild (recreating dozens of charts from scratch and
+rebinding every field) and hands a designer a **live, openable report to refine** — not a blank
+canvas and not a static image.
 
 ## Reproduce the run
 
