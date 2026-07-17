@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Scratch conversion runs (regenerable). The committed `output/` is the
+# README's canonical proof bundle; these variants are local experiments.
+output-hard/
+output-real/
+output-tablecalc/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp

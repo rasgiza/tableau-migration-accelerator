@@ -1,0 +1,147 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<!--
+  Revenue Cycle Flat — a deliberately HARD, single denormalized "flat table" datasource.
+  One wide table (ClaimsFlat) loaded with the Tableau constructs that are hardest to migrate:
+  nested FIXED / INCLUDE / EXCLUDE LOD, table calcs (RANK, RUNNING_SUM, WINDOW_AVG, LOOKUP,
+  TOTAL), a parameter-driven calc, and date/string logic. Used to stress-test the accelerator
+  and show honestly what auto-translates to DAX vs. what needs human review.
+-->
+<datasource formatted-name='Revenue Cycle Flat' inline='true' version='18.1'>
+  <connection class='federated'>
+    <named-connections>
+      <named-connection caption='claims' name='sqlserver.claims'>
+        <connection authentication='sqlserver' class='sqlserver' dbname='RevCycleDW'
+                    server='placeholder-revcycle.database.windows.net' username='svc_placeholder' />
+      </named-connection>
+    </named-connections>
+    <relation connection='sqlserver.claims' name='ClaimsFlat' table='[dbo].[ClaimsFlat]' type='table' />
+    <metadata-records>
+      <metadata-record class='column'>
+        <remote-name>Claim ID</remote-name><local-name>[Claim ID]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>integer</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Encounter ID</remote-name><local-name>[Encounter ID]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>integer</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Patient ID</remote-name><local-name>[Patient ID]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>integer</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Payer</remote-name><local-name>[Payer]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>string</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Service Line</remote-name><local-name>[Service Line]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>string</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Department</remote-name><local-name>[Department]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>string</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Provider</remote-name><local-name>[Provider]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>string</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Charge Amount</remote-name><local-name>[Charge Amount]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>real</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Allowed Amount</remote-name><local-name>[Allowed Amount]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>real</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Paid Amount</remote-name><local-name>[Paid Amount]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>real</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Adjustment Amount</remote-name><local-name>[Adjustment Amount]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>real</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Denied Amount</remote-name><local-name>[Denied Amount]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>real</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Claim Status</remote-name><local-name>[Claim Status]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>string</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Service Date</remote-name><local-name>[Service Date]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>datetime</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Post Date</remote-name><local-name>[Post Date]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>datetime</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>DRG Code</remote-name><local-name>[DRG Code]</local-name>
+        <parent-name>[ClaimsFlat]</parent-name><local-type>string</local-type>
+      </metadata-record>
+    </metadata-records>
+  </connection>
+
+  <!-- ============ Tier 1: should translate deterministically ============ -->
+  <column caption='Total Charges' datatype='real' name='[Calculation_01]' role='measure'>
+    <calculation class='tableau' formula='SUM([Charge Amount])' />
+  </column>
+  <column caption='Total Paid' datatype='real' name='[Calculation_02]' role='measure'>
+    <calculation class='tableau' formula='SUM([Paid Amount])' />
+  </column>
+  <column caption='Net Collection Rate' datatype='real' name='[Calculation_03]' role='measure'>
+    <calculation class='tableau' formula='SUM([Paid Amount]) / SUM([Allowed Amount])' />
+  </column>
+  <column caption='Denial Rate' datatype='real' name='[Calculation_04]' role='measure'>
+    <calculation class='tableau' formula='SUM([Denied Amount]) / SUM([Charge Amount])' />
+  </column>
+  <column caption='Days to Pay' datatype='integer' name='[Calculation_05]' role='measure'>
+    <calculation class='tableau' formula="DATEDIFF('day', [Service Date], [Post Date])" />
+  </column>
+  <column caption='Payer Clean' datatype='string' name='[Calculation_06]' role='dimension'>
+    <calculation class='tableau' formula='TRIM(UPPER([Payer]))' />
+  </column>
+
+  <!-- ============ Tier 2: LOD — expect stubs / needs-review ============ -->
+  <column caption='Charges per Payer (FIXED)' datatype='real' name='[Calculation_07]' role='measure'>
+    <calculation class='tableau' formula='{ FIXED [Payer] : SUM([Charge Amount]) }' />
+  </column>
+  <column caption='First Service Date (FIXED)' datatype='datetime' name='[Calculation_08]' role='measure'>
+    <calculation class='tableau' formula='{ FIXED [Patient ID] : MIN([Service Date]) }' />
+  </column>
+  <column caption='Avg Claim per Encounter (INCLUDE)' datatype='real' name='[Calculation_09]' role='measure'>
+    <calculation class='tableau' formula='{ INCLUDE [Encounter ID] : SUM([Charge Amount]) }' />
+  </column>
+  <column caption='Dept Charges excl Provider (EXCLUDE)' datatype='real' name='[Calculation_10]' role='measure'>
+    <calculation class='tableau' formula='{ EXCLUDE [Provider] : SUM([Charge Amount]) }' />
+  </column>
+  <column caption='Nested Payer-Patient Avg' datatype='real' name='[Calculation_11]' role='measure'>
+    <calculation class='tableau' formula='{ FIXED [Payer] : AVG({ FIXED [Patient ID] : SUM([Charge Amount]) }) }' />
+  </column>
+
+  <!-- ============ Tier 3: table calcs — expect stubs / needs-review ============ -->
+  <column caption='Running Paid' datatype='real' name='[Calculation_12]' role='measure'>
+    <calculation class='tableau' formula='RUNNING_SUM(SUM([Paid Amount]))' />
+  </column>
+  <column caption='Payer Rank' datatype='integer' name='[Calculation_13]' role='measure'>
+    <calculation class='tableau' formula='RANK(SUM([Charge Amount]))' />
+  </column>
+  <column caption='Pct of Total Charges' datatype='real' name='[Calculation_14]' role='measure'>
+    <calculation class='tableau' formula='SUM([Charge Amount]) / TOTAL(SUM([Charge Amount]))' />
+  </column>
+  <column caption='MoM Paid Growth' datatype='real' name='[Calculation_15]' role='measure'>
+    <calculation class='tableau' formula='(ZN(SUM([Paid Amount])) - LOOKUP(ZN(SUM([Paid Amount])), -1)) / ABS(LOOKUP(ZN(SUM([Paid Amount])), -1))' />
+  </column>
+  <column caption='Window Avg Paid' datatype='real' name='[Calculation_16]' role='measure'>
+    <calculation class='tableau' formula='WINDOW_AVG(SUM([Paid Amount]))' />
+  </column>
+
+  <!-- ============ Tier 4: parameter + branching logic ============ -->
+  <column caption='High Charge Flag' datatype='string' name='[Calculation_17]' role='dimension'>
+    <calculation class='tableau' formula="IF SUM([Charge Amount]) &gt; [Charge Threshold] THEN 'High' ELSE 'Low' END" />
+  </column>
+  <column caption='Aging Bucket' datatype='string' name='[Calculation_18]' role='dimension'>
+    <calculation class='tableau' formula="IF DATEDIFF('day',[Service Date],[Post Date]) &lt;= 30 THEN '0-30' ELSEIF DATEDIFF('day',[Service Date],[Post Date]) &lt;= 60 THEN '31-60' ELSE '60+' END" />
+  </column>
+</datasource>

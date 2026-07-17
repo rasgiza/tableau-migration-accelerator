@@ -1,0 +1,123 @@
+table Date
+	lineageTag: e96a2f73-fd36-414a-9ca7-2785163a4e33
+	dataCategory: Time
+
+	column Date
+		dataType: dateTime
+		isKey
+		formatString: Short Date
+		lineageTag: 135afb97-5048-4e35-95e5-82efbc121f71
+		summarizeBy: none
+		isNameInferred
+		sourceColumn: [Date]
+
+		annotation SummarizationSetBy = Automatic
+
+	column Year = YEAR('Date'[Date])
+		formatString: 0
+		lineageTag: 7a2a26a7-28ab-41c1-95f6-d1891e67cd16
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Quarter No' = QUARTER('Date'[Date])
+		isHidden
+		formatString: 0
+		lineageTag: 12faa549-9dae-426d-a649-c6d5202e99b6
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column Quarter = "Q" & QUARTER('Date'[Date])
+		lineageTag: 0305120d-f5c9-47c4-9654-0f8d45041a53
+		summarizeBy: none
+		sortByColumn: 'Quarter No'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Month No' = MONTH('Date'[Date])
+		isHidden
+		formatString: 0
+		lineageTag: 1623abcd-fcf0-415e-875e-770ade452356
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column Month = FORMAT('Date'[Date], "MMM")
+		lineageTag: 846c598f-4390-47b5-bba4-34bbd534b524
+		summarizeBy: none
+		sortByColumn: 'Month No'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Week of Month' = WEEKNUM('Date'[Date]) - WEEKNUM(DATE(YEAR('Date'[Date]), MONTH('Date'[Date]), 1)) + 1
+		formatString: 0
+		lineageTag: 008d8210-03ad-4721-b2d6-af547ebaf3a6
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Week of Year' = WEEKNUM('Date'[Date], 21)
+		formatString: 0
+		lineageTag: a64ed158-0f0e-41a4-98b3-2c3f7ff18d79
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column Day = DAY('Date'[Date])
+		formatString: 0
+		lineageTag: 218decd2-6bf7-4a4d-abbf-dcb8aeefd7e5
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Weekday No' = WEEKDAY('Date'[Date], 2)
+		isHidden
+		formatString: 0
+		lineageTag: 04e24a68-3906-4dd3-ae77-9a0207ae5087
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Day Name' = FORMAT('Date'[Date], "dddd")
+		lineageTag: e396cf16-86f8-41e0-942d-0043974843a4
+		summarizeBy: none
+		sortByColumn: 'Weekday No'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'ISO Year' = YEAR('Date'[Date] + 4 - WEEKDAY('Date'[Date], 2))
+		formatString: 0
+		lineageTag: eecd66b3-b37c-4b3f-9801-2967b970adca
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	hierarchy Calendar
+		lineageTag: 606fdbf5-1292-4455-9a1f-31e2dfca255d
+
+		level Year
+			lineageTag: 86b28b4c-1f90-4ef8-8acf-35fd3b2ec301
+			column: Year
+
+		level Quarter
+			lineageTag: 71ae89f0-fbfe-4779-9067-e4233d2b3e58
+			column: Quarter
+
+		level Month
+			lineageTag: ebe4399d-e1f5-497e-8b1b-9009b480b3da
+			column: Month
+
+		level Week
+			lineageTag: fc91c7fe-c154-4a8f-8004-97149623fc80
+			column: 'Week of Month'
+
+		level Day
+			lineageTag: 7b6ffe72-25b9-47d7-b13f-69ee0b7650b6
+			column: Day
+
+	partition Date = calculated
+		mode: import
+		source = CALENDAR(DATE(2015, 1, 1), DATE(2035, 12, 31))
+
+	annotation PBI_Id = Date

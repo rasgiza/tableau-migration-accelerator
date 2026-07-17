@@ -1,0 +1,61 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/1.0.0/schema.json",
+  "name": "v-page-Executive47b2b9f8",
+  "position": {
+    "x": 500.0,
+    "y": 0.0,
+    "z": 0,
+    "width": 500.0,
+    "height": 800.0,
+    "tabOrder": 1
+  },
+  "visual": {
+    "visualType": "clusteredColumnChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Orders"
+                    }
+                  },
+                  "Property": "Region"
+                }
+              },
+              "queryRef": "Orders.Region",
+              "nativeQueryRef": "Region"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Orders"
+                        }
+                      },
+                      "Property": "Profit"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Orders.Profit)",
+              "nativeQueryRef": "Sum of Profit"
+            }
+          ]
+        }
+      }
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

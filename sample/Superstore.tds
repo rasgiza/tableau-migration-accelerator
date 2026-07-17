@@ -1,0 +1,43 @@
+﻿<?xml version='1.0' encoding='utf-8' ?>
+<datasource formatted-name='Superstore' inline='true' version='18.1'>
+  <connection class='federated'>
+    <named-connections>
+      <named-connection caption='store' name='sqlserver.store'>
+        <connection authentication='sqlserver' class='sqlserver' dbname='StoreDW'
+                    server='placeholder-store.database.windows.net' username='svc_placeholder' />
+      </named-connection>
+    </named-connections>
+    <relation connection='sqlserver.store' name='Orders' table='[dbo].[Orders]' type='table' />
+    <metadata-records>
+      <metadata-record class='column'>
+        <remote-name>Category</remote-name><local-name>[Category]</local-name>
+        <parent-name>[Orders]</parent-name><local-type>string</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Region</remote-name><local-name>[Region]</local-name>
+        <parent-name>[Orders]</parent-name><local-type>string</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Sales Amount</remote-name><local-name>[Sales]</local-name>
+        <parent-name>[Orders]</parent-name><local-type>real</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Profit</remote-name><local-name>[Profit]</local-name>
+        <parent-name>[Orders]</parent-name><local-type>real</local-type>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Order Date</remote-name><local-name>[Order Date]</local-name>
+        <parent-name>[Orders]</parent-name><local-type>datetime</local-type>
+      </metadata-record>
+    </metadata-records>
+  </connection>
+  <column caption='Total Sales' datatype='real' name='[Calculation_1]' role='measure'>
+    <calculation class='tableau' formula='SUM([Sales])' />
+  </column>
+  <column caption='Profit Ratio' datatype='real' name='[Calculation_2]' role='measure'>
+    <calculation class='tableau' formula='SUM([Profit]) / SUM([Sales])' />
+  </column>
+  <column caption='Running Sales' datatype='real' name='[Calculation_3]' role='measure'>
+    <calculation class='tableau' formula='RUNNING_SUM(SUM([Sales]))' />
+  </column>
+</datasource>

@@ -1,0 +1,14 @@
+{
+  "datasources_present": [
+    "Superstore"
+  ],
+  "workbooks": [
+    {
+      "name": "Superstore",
+      "kind": "embedded",
+      "published_ds_name": null,
+      "datasource_present": null
+    }
+  ],
+  "missing_published_datasources": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/report/1.0.0/schema.json",
+  "layoutOptimization": "None",
+  "themeCollection": {
+    "baseTheme": {
+      "name": "CY24SU10",
+      "reportVersionAtImport": "5.61",
+      "type": "SharedResources"
+    },
+    "customTheme": {
+      "name": "TableauPalette.json",
+      "reportVersionAtImport": "5.61",
+      "type": "RegisteredResources"
+    }
+  },
+  "resourcePackages": [
+    {
+      "name": "RegisteredResources",
+      "type": "RegisteredResources",
+      "items": [
+        {
+          "name": "TableauPalette.json",
+          "path": "TableauPalette.json",
+          "type": "CustomTheme"
+        }
+      ]
+    }
+  ]
+}

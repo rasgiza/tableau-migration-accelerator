@@ -1,0 +1,187 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<!--
+  Table Calc Showcase — a deliberately focused workbook that PLACES quick table
+  calculations on worksheets so the accelerator's table-calc seam can translate
+  them into real windowed DAX + Visual Calculations instead of stubbing them as
+  "unplaced". One flat table (SalesFlat) plus five worksheets, each carrying a
+  single clean addressing dimension so every calc translates faithfully:
+
+    * Running Sales        -> CumTotal (running total)  along Order Date
+    * Rank by Sub-Category -> Rank (Competition, DESC)   over Sub-Category
+    * Moving Avg Sales     -> WindowTotal Avg (-2..0)     along Order Date
+    * Pct of Total Sales   -> PercentOfTotal (order-free) over Sub-Category
+    * MoM Pct Difference   -> PctDiff (prior row)         along Order Date
+-->
+<workbook version='18.1'>
+  <datasources>
+    <datasource caption='Sales Flat' formatted-name='federated.salesflat' inline='true' name='federated.salesflat' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='sales' name='sqlserver.sales'>
+            <connection authentication='sqlserver' class='sqlserver' dbname='SalesDW'
+                        server='placeholder-sales.database.windows.net' username='svc_placeholder' />
+          </named-connection>
+        </named-connections>
+        <relation connection='sqlserver.sales' name='SalesFlat' table='[dbo].[SalesFlat]' type='table' />
+        <metadata-records>
+          <metadata-record class='column'>
+            <remote-name>Category</remote-name><local-name>[Category]</local-name>
+            <parent-name>[SalesFlat]</parent-name><local-type>string</local-type>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>Sub-Category</remote-name><local-name>[Sub-Category]</local-name>
+            <parent-name>[SalesFlat]</parent-name><local-type>string</local-type>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>Order Date</remote-name><local-name>[Order Date]</local-name>
+            <parent-name>[SalesFlat]</parent-name><local-type>datetime</local-type>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>Sales</remote-name><local-name>[Sales]</local-name>
+            <parent-name>[SalesFlat]</parent-name><local-type>real</local-type>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>Profit</remote-name><local-name>[Profit]</local-name>
+            <parent-name>[SalesFlat]</parent-name><local-type>real</local-type>
+          </metadata-record>
+        </metadata-records>
+      </connection>
+      <column caption='Category' datatype='string' name='[Category]' role='dimension' type='nominal' />
+      <column caption='Sub-Category' datatype='string' name='[Sub-Category]' role='dimension' type='nominal' />
+      <column caption='Order Date' datatype='datetime' name='[Order Date]' role='dimension' type='ordinal' />
+      <column aggregation='Sum' caption='Sales' datatype='real' name='[Sales]' role='measure' type='quantitative' />
+      <column aggregation='Sum' caption='Profit' datatype='real' name='[Profit]' role='measure' type='quantitative' />
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='Running Sales'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Sales Flat' name='federated.salesflat' />
+          </datasources>
+          <datasource-dependencies datasource='federated.salesflat'>
+            <column aggregation='Sum' datatype='real' name='[Sales]' role='measure' type='quantitative' caption='Sales' />
+            <column datatype='datetime' name='[Order Date]' role='dimension' type='ordinal' caption='Order Date' />
+            <column-instance column='[Sales]' derivation='Sum' name='[cum:sum:Sales:qk]' pivot='key' type='quantitative'>
+              <table-calc aggregation='Sum' ordering-type='Rows' type='CumTotal' />
+            </column-instance>
+            <column-instance column='[Order Date]' derivation='Month-Trunc' name='[tmn:Order Date:qk]' pivot='key' type='ordinal' />
+          </datasource-dependencies>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Line' />
+          </pane>
+        </panes>
+        <rows>[federated.salesflat].[cum:sum:Sales:qk]</rows>
+        <cols>[federated.salesflat].[tmn:Order Date:qk]</cols>
+      </table>
+    </worksheet>
+    <worksheet name='Rank by Sub-Category'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Sales Flat' name='federated.salesflat' />
+          </datasources>
+          <datasource-dependencies datasource='federated.salesflat'>
+            <column aggregation='Sum' datatype='real' name='[Sales]' role='measure' type='quantitative' caption='Sales' />
+            <column datatype='string' name='[Sub-Category]' role='dimension' type='nominal' caption='Sub-Category' />
+            <column-instance column='[Sales]' derivation='Sum' name='[rank:sum:Sales:qk]' pivot='key' type='quantitative'>
+              <table-calc ordering-field='[federated.salesflat].[none:Sub-Category:nk]' ordering-type='Field' rank-options='Competition,Descending' type='Rank' />
+            </column-instance>
+            <column-instance column='[Sub-Category]' derivation='None' name='[none:Sub-Category:nk]' pivot='key' type='nominal' />
+          </datasource-dependencies>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Bar' />
+          </pane>
+        </panes>
+        <rows>[federated.salesflat].[rank:sum:Sales:qk]</rows>
+        <cols>[federated.salesflat].[none:Sub-Category:nk]</cols>
+      </table>
+    </worksheet>
+    <worksheet name='Moving Avg Sales'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Sales Flat' name='federated.salesflat' />
+          </datasources>
+          <datasource-dependencies datasource='federated.salesflat'>
+            <column aggregation='Sum' datatype='real' name='[Sales]' role='measure' type='quantitative' caption='Sales' />
+            <column datatype='datetime' name='[Order Date]' role='dimension' type='ordinal' caption='Order Date' />
+            <column-instance column='[Sales]' derivation='Sum' name='[win:sum:Sales:qk]' pivot='key' type='quantitative'>
+              <table-calc aggregation='Avg' from='-2' ordering-type='Rows' to='0' type='WindowTotal' window-options='IncludeCurrent' />
+            </column-instance>
+            <column-instance column='[Order Date]' derivation='Month-Trunc' name='[tmn:Order Date:qk]' pivot='key' type='ordinal' />
+          </datasource-dependencies>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Line' />
+          </pane>
+        </panes>
+        <rows>[federated.salesflat].[win:sum:Sales:qk]</rows>
+        <cols>[federated.salesflat].[tmn:Order Date:qk]</cols>
+      </table>
+    </worksheet>
+    <worksheet name='Pct of Total Sales'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Sales Flat' name='federated.salesflat' />
+          </datasources>
+          <datasource-dependencies datasource='federated.salesflat'>
+            <column aggregation='Sum' datatype='real' name='[Sales]' role='measure' type='quantitative' caption='Sales' />
+            <column datatype='string' name='[Sub-Category]' role='dimension' type='nominal' caption='Sub-Category' />
+            <column-instance column='[Sales]' derivation='Sum' name='[pctt:sum:Sales:qk]' pivot='key' type='quantitative'>
+              <table-calc aggregation='Sum' ordering-type='Field' type='PercentOfTotal'>
+                <order field='[federated.salesflat].[none:Sub-Category:nk]' />
+              </table-calc>
+            </column-instance>
+            <column-instance column='[Sub-Category]' derivation='None' name='[none:Sub-Category:nk]' pivot='key' type='nominal' />
+          </datasource-dependencies>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Bar' />
+          </pane>
+        </panes>
+        <rows>[federated.salesflat].[pctt:sum:Sales:qk]</rows>
+        <cols>[federated.salesflat].[none:Sub-Category:nk]</cols>
+      </table>
+    </worksheet>
+    <worksheet name='MoM Pct Difference'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Sales Flat' name='federated.salesflat' />
+          </datasources>
+          <datasource-dependencies datasource='federated.salesflat'>
+            <column aggregation='Sum' datatype='real' name='[Sales]' role='measure' type='quantitative' caption='Sales' />
+            <column datatype='datetime' name='[Order Date]' role='dimension' type='ordinal' caption='Order Date' />
+            <column-instance column='[Sales]' derivation='Sum' name='[pcdf:sum:Sales:qk]' pivot='key' type='quantitative'>
+              <table-calc aggregation='Sum' ordering-type='Rows' type='PctDiff' />
+            </column-instance>
+            <column-instance column='[Order Date]' derivation='Month-Trunc' name='[tmn:Order Date:qk]' pivot='key' type='ordinal' />
+          </datasource-dependencies>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Line' />
+          </pane>
+        </panes>
+        <rows>[federated.salesflat].[pcdf:sum:Sales:qk]</rows>
+        <cols>[federated.salesflat].[tmn:Order Date:qk]</cols>
+      </table>
+    </worksheet>
+  </worksheets>
+  <windows>
+    <window class='worksheet' name='Running Sales' />
+    <window class='worksheet' name='Rank by Sub-Category' />
+    <window class='worksheet' name='Moving Avg Sales' />
+    <window class='worksheet' name='Pct of Total Sales' />
+    <window class='worksheet' name='MoM Pct Difference' />
+  </windows>
+</workbook>

@@ -1,0 +1,49 @@
+# Sensitive Tableau artifacts — NEVER commit (plaintext source/connection details)
+*.tds
+*.tdsx
+*.twb
+*.twbx
+*.hyper
+
+# Secrets / credentials
+*.pat
+.env
+.env.*
+*secret*
+*credential*
+!**/security-governance.md
+# Skill SOURCE files that legitimately carry "credential" in the name (no secrets — the resolver
+# code + its tests). Specific filenames only, so the broad *credential* guard above still applies.
+!**/credential_resolver.py
+!**/test_credential_resolver.py
+
+# Local, prefilled migration variables (real values) — only the committed *.example.ps1 is a template
+migration.vars.local.ps1
+
+# Temp / scratch harnesses
+_*.py
+!__init__.py
+*.tmp
+
+# tableauhyperapi process log (written into CWD when the real hyper round-trip runs)
+hyperd.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Allow committed example/template env files (never real secrets)
+!.env.example
+!**/.env.example
