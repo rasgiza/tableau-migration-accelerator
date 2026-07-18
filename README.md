@@ -41,8 +41,30 @@ What it does, in order:
 4. Copies the bundle to `-Output` (default `.\output`) and prints a summary +
    the exact `.pbip` path to open in Power BI Desktop.
 
-Requirements: Windows PowerShell + **Python 3.11+** (the script auto-detects
-`py -3.11` / `python`). No live Tableau, no Tableau Desktop, no internet.
+Requirements: **Python 3.11+** (the script auto-detects `py -3.11` / `python`).
+No live Tableau, no Tableau Desktop, no internet.
+
+### Will this run on my teammates' machines?
+
+Yes. The engine is **pure Python 3.11 standard library — zero `pip install`** for the
+core migration (parse `.twb`/`.tds`, translate calcs → DAX, build the TMDL semantic
+model + `.pbip` report + native visuals). That core runs identically on **Windows
+(x64 and ARM64), macOS (Intel and Apple Silicon), and Linux**. The PowerShell wrapper
+is Windows-only, but the underlying `migrate_estate.py` runs anywhere Python does.
+
+There is exactly **one optional native dependency**, `tableauhyperapi`, used *only* to
+read the data baked inside packaged `.twbx` files (the `.hyper` extract). It is not
+required for the deliverable and the engine **warns-and-skips** when it is absent — it
+never crashes. Install it only if you need to crack open packaged extracts:
+
+```powershell
+py -3.11 -m pip install tableauhyperapi
+```
+
+Availability: x64 Windows / x64 Linux / macOS ✅. **Windows-on-ARM is the one gap**
+(Salesforce ships no ARM wheel) — on those machines packaged `.twbx` extracts warn and
+skip; run just those on any x64 box or CI runner, or bind to the live warehouse instead
+(the usual real-project path, where `.hyper` reading is never needed).
 
 ## What's here
 
@@ -100,6 +122,64 @@ interactive `.pbip` report, not a flat picture. Fidelity splits into two layers:
 Bottom line: it removes the mechanical rebuild (recreating dozens of charts from scratch and
 rebinding every field) and hands a designer a **live, openable report to refine** — not a blank
 canvas and not a static image.
+
+## How does it handle my calculations, LOD expressions, parameters & custom SQL?
+
+This is the question most estates actually care about. A large customer told us they had
+*"150+ Tableau workbooks; thousands of calculations, LOD expressions, parameters, and custom
+SQL."* Here is exactly what the engine does with each — automated where it can be **proven**,
+flagged (never silently guessed) where it can't:
+
+| Tableau construct | What the engine does | Confidence |
+|---|---|---|
+| **Calculations** (arithmetic, logical, string, date, standard aggregations) | Deterministically translated to **DAX**, original formula preserved as a `TableauFormula` annotation. Safe division becomes `DIVIDE()`, not a naive `/`. | High — auto |
+| **Calculations** (table calcs, `RUNNING_SUM`, `WINDOW_*`, rank, nested/argmax) | Emitted as an **inert, labeled stub** with the original formula attached, so it's a visible TODO — never a wrong number that ships. | Flagged for review |
+| **LOD — `FIXED`** over a real/derived grain (e.g. `{FIXED [Order Date (Months)] : SUM([Sales])}`) | Detected, bound to a real calculated column, and translated. | High — auto (tractable cases) |
+| **LOD — `INCLUDE` / `EXCLUDE`, nested LODs, argmax** | Detected and **handed off** rather than force-fit into wrong DAX (no clean 1:1 exists). | Flagged for review |
+| **Parameters — value / what-if** | Rebuilt as a disconnected what-if table + a `[<Param> Value]` measure. | High — auto |
+| **Parameters — field/measure swap** | Rebuilt as native **Power BI field parameters**. | High — auto |
+| **Parameters — plain filter** | Surfaced for review (a Tableau filter card ≠ a Power BI slicer). | Flagged for review |
+| **Custom SQL** (foldable) | Flows through as a native query with correct de-escaping and parameter-reference extraction. | High — auto |
+| **Custom SQL** (unfoldable cross-engine joins/unions, unknown connector) | **Reported**, not dropped, so a human rebinds it. | Flagged for review |
+
+**What to expect at estate scale.** On a calc-heavy stress-test estate, a single run auto-translated
+~28% of workbook calcs and flagged the rest — that number is *deliberately conservative* because the
+engine refuses to guess. Real production estates skew far higher, because most calcs are simple
+arithmetic/logical expressions. The value is not "100% automatic": it is that the tool does the
+mechanical majority and hands your team a **precise, per-construct worklist** of exactly what needs a
+human — instead of forcing them to hunt for what silently broke.
+
+**Guiding principle — *warn, never wrong*.** Every run ends with a definition-of-done gate that fails
+*loud* when it cannot prove a binding (e.g. it will not auto-pick Import vs. DirectLake storage mode).
+A red gate is the tool being honest, not broken — it converts what it can prove and refuses to guess
+the rest.
+
+## Planning a large estate (e.g. 150+ workbooks) — what to expect
+
+If you are sizing a real migration, tell the customer these four things up front. It is an
+**accelerator, not a zero-touch converter** — and that distinction is the whole value.
+
+1. **Plan for a review pass.** Expect a meaningful flagged/stubbed list on any large estate. The
+   value is not "100% automatic" — the tool does the mechanical majority, tells you *exactly* which
+   calcs/LODs/custom-SQL need a human, and **never ships a wrong measure** (see the construct table
+   above).
+2. **Storage mode is deliberately not guessed.** It will not auto-pick DirectLake vs. Import; it
+   binds what it can prove and flags the rest for you to point at the live warehouse. A red
+   definition-of-done gate here is expected, not a failure.
+3. **Packaged `.twbx` extract reading needs x64.** The one optional native dependency
+   (`tableauhyperapi`) has no Windows-on-ARM wheel. For a 150-workbook batch, run the estate on an
+   **x64 box or CI runner** — otherwise packaged-data workbooks warn-and-skip (see
+   [Will this run on my teammates' machines?](#will-this-run-on-my-teammates-machines) above).
+4. **Visual fidelity is "close, needs eyeballing."** Charts rebuild as native, live Power BI
+   visuals, but complex vizzes want a visual QA pass — the `fidelity_oracle` hands you a per-visual
+   punch-list of exactly which ones matched and which need hand-finishing (see
+   [What happens to my dashboards & visuals?](#what-happens-to-my-dashboards--visuals) above).
+
+**Bottom line for the customer conversation:** it collapses the mechanical majority of a
+150-workbook migration into a deterministic, repeatable, **offline** batch, and — crucially — hands
+the team a **precise, labeled worklist** for the LOD / custom-SQL / calc tail instead of forcing them
+to hunt for what silently broke. At that scale, "here is exactly what needs a human" is worth more
+than the raw conversion percentage.
 
 ## Reproduce the run
 
