@@ -54,8 +54,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent $here   # tableau-accelerator/
-$skill = Join-Path $root 'engine\skills\tableau-migration'
-$migrate = Join-Path $skill 'scripts\migrate_estate.py'
+# Forward slashes so Join-Path resolves on Windows AND PowerShell 7 on macOS/Linux
+# (backslash literals stay literal on Unix and would break Test-Path below).
+$skill = Join-Path $root 'engine/skills/tableau-migration'
+$migrate = Join-Path $skill 'scripts/migrate_estate.py'
 
 if (-not (Test-Path $migrate)) {
     throw "Migration engine not found at '$migrate'. Is the 'engine/' folder present?"

@@ -197,21 +197,32 @@ def test_estate_datasource_accounting(estate):
 # =============================================================================
 # byPath dataset-NAME mismatch (workbook stem != bound datasource name).
 # =============================================================================
-def test_bypath_dataset_name_mismatch(tmp_path):
+def test_bypath_dataset_name_mismatch_self_heals_to_sole_model(tmp_path):
+    """A workbook whose stem differs from its datasource name still binds to the right model.
+
+    ``materialize_mismatched`` emits ``Superstore.tds + ExecutiveSales.twb``, so the viz stage bakes
+    byPath ``../ExecutiveSales.SemanticModel`` (the workbook stem) while the only emitted model is
+    ``Superstore.SemanticModel``. In a single-datasource estate there is exactly ONE model the report
+    can mean, so the orchestrator repoints the reports/-tree byPath at it -- the report resolves and
+    opens instead of dangling. (A genuinely DROPPED model -- zero models -- still fails loudly via the
+    validator's ``missing-model`` tag; that protection is exercised by the validator self-tests below.)
+    """
     src = str(tmp_path / "src")
     out = str(tmp_path / "out")
     fixtures.materialize_mismatched(src)          # Superstore.tds + ExecutiveSales.twb
-    _ctx, results = vb.validate(src, out)
+    ctx, results = vb.validate(src, out)
     by_key = {r.key: r for r in results}
 
+    # the sole emitted model is Superstore; the report now binds to it despite the name mismatch
+    assert sorted(ctx.models) == ["Superstore"]
     r3 = by_key["3"]
-    assert r3.status == FAIL
-    # the report binds to 'ExecutiveSales.SemanticModel', which is never emitted (model is Superstore)
-    assert "dataset-name-mismatch" in r3.tags, _diag(r3)
+    assert r3.status == PASS, _diag(r3)
+    bypath = vb._read_pbir_bypath(ctx.reports[0])
+    assert bypath == "../../semantic_models/Superstore.SemanticModel", bypath
 
-    # and because the named model does not exist, binding integrity has nothing to bind to
+    # and because the byPath now resolves to a complete model, binding integrity holds too
     r4 = by_key["4"]
-    assert r4.status == FAIL, _diag(r4)
+    assert r4.status == PASS, _diag(r4)
 
 
 # =============================================================================
