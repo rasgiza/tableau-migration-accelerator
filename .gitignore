@@ -16,6 +16,13 @@ env/
 output-hard/
 output-real/
 output-tablecalc/
+output-estate/
+output-newuser/
+my-test-estate/
+my-test-output/
+
+# Demo-source originals (backups of downloaded workbooks before repoint)
+_estate_originals/
 
 # OS / editor cruft
 .DS_Store
