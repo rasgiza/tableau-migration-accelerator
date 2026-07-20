@@ -1328,6 +1328,29 @@ def test_workbook_pbip_is_openable_and_bound_bypath(tmp_path):
     assert s["visuals_rebuilt"] >= 1
 
 
+def test_reports_tree_bypath_resolves_to_semantic_model(tmp_path):
+    """The standalone reports/<Name>.Report byPath must resolve to the model under semantic_models/.
+
+    The viz stage bakes the canonical PBIP sibling path ('../<name>.SemanticModel'); the estate nests
+    reports/ and semantic_models/ as separate trees, so from reports/<Name>.Report the model is two
+    levels up and across. Regression guard for the former 'bypath-layout-mismatch' open-blocker.
+    """
+    src = InMemoryTableauSource(datasources={"Superstore": LIVE_TDS},
+                                workbooks={"Exec Dashboard": SUPERSTORE_DASHBOARD_TWB})
+    out = tmp_path / "b"
+    migrate_estate(src, str(out))
+
+    model_dir = out / "semantic_models" / "Superstore.SemanticModel"
+    assert (model_dir / "definition" / "model.tmdl").is_file()
+
+    report_dir = out / "reports" / "Exec Dashboard.Report"
+    pbir = report_dir / "definition.pbir"
+    assert pbir.is_file()
+    ref = json.loads(pbir.read_text(encoding="utf-8"))["datasetReference"]["byPath"]["path"]
+    assert ref == "../../semantic_models/Superstore.SemanticModel"
+    # the relative path actually resolves to the emitted model folder inside the bundle
+    assert (report_dir / ref).resolve() == model_dir.resolve()
+
 # -- definition-of-done gate for workbook inputs (rm-dashboard-default-discoverability) ----------
 # A Tableau workbook migration is not "done" when only its semantic model lands -- its dashboards
 # must be rebuilt and bound into an openable .pbip. The estate CLI now emits a machine
@@ -2537,6 +2560,28 @@ def test_cli_main_no_pbip_flag_suppresses_projects(fixtures_dir, tmp_path, capsy
     assert rc == 0
     assert not os.path.isdir(os.path.join(out, "pbip"))
     assert "Openable projects:" not in capsys.readouterr().out
+
+
+# -- CLI preflight guards (bad interpreter / bad input folder / empty estate) --------------------
+# Fail loudly and EARLY on the mistakes a first-time tester most often makes, rather than crashing
+# mid-run or "succeeding" with an empty bundle.
+
+def test_cli_stops_on_missing_input_folder(tmp_path, capsys):
+    missing = str(tmp_path / "does-not-exist")
+    rc = me.main(["-i", missing, "-o", str(tmp_path / "out")])
+    assert rc == 2
+    printed = capsys.readouterr().out
+    assert "[STOP]" in printed and "Input folder not found" in printed
+
+
+def test_cli_stops_on_empty_input_folder(tmp_path, capsys):
+    empty = tmp_path / "in"
+    empty.mkdir()
+    (empty / "notes.txt").write_text("not a tableau asset", encoding="utf-8")
+    rc = me.main(["-i", str(empty), "-o", str(tmp_path / "out")])
+    assert rc == 2
+    printed = capsys.readouterr().out
+    assert "[STOP]" in printed and "No Tableau assets found" in printed
 
 
 # -- stale-output build guard (refuse a FRESH build over a prior run's report.json) --------------

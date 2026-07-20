@@ -166,7 +166,7 @@ def tableau_geo_role_to_data_category(semantic_role):
     return _GEO_ROLE_DATA_CATEGORY.get(m.group(1).strip().lower())
 
 def generate_column_tmdl(col_name, tmdl_type, summarize, is_hidden, format_string=None,
-                         data_category=None, source_column=None):
+                         data_category=None, source_column=None, description=None):
     """One column. col_name is the model column NAME.
 
     ``source_column`` is an OPTIONAL raw source name to bind to (the Power Query output column /
@@ -189,8 +189,15 @@ def generate_column_tmdl(col_name, tmdl_type, summarize, is_hidden, format_strin
     decoded from a Tableau geo ``semantic-role`` via ``tableau_geo_role_to_data_category``). When
     truthy a ``dataCategory:`` line is emitted so map visuals geocode the column unambiguously; when
     None the line is absent and the TMDL is byte-for-byte unchanged (additive, never a regression).
+
+    ``description`` is an OPTIONAL human-readable description emitted as a leading ``///`` comment so
+    Power BI Q&A / Copilot can ground answers on it; falsy keeps the TMDL byte-for-byte unchanged.
     """
-    lines = [f"\tcolumn {q(col_name)}", f"\t\tdataType: {tmdl_type}"]
+    lines = []
+    _desc = " ".join((description or "").split())
+    if _desc:
+        lines.append(f"\t/// {_desc}")
+    lines += [f"\tcolumn {q(col_name)}", f"\t\tdataType: {tmdl_type}"]
     if is_hidden:
         lines.append("\t\tisHidden")
     fmt = format_string or _format_string(tmdl_type, summarize)
@@ -288,8 +295,25 @@ def _tmdl_assignment(decl, expr, body_indent="\t\t\t"):
     body = "".join(f"{body_indent}{line}\n" for line in expr.split("\n"))
     return f"{decl} =\n{body}"
 
+def _tmdl_desc_prefix(description):
+    """A TMDL ``///`` description comment + a trailing tab, to prepend to an object declaration.
+
+    Power BI / Copilot read an object's description from the ``///`` triple-slash comment lines
+    immediately preceding its declaration. This renders one such line (``/// <text>`` + newline +
+    a tab so the following ``measure``/``column`` keyword lands at its original indent). The text
+    is whitespace-collapsed to a single physical line -- a ``///`` comment runs to end-of-line, so
+    an embedded newline would drop the tail out of the description and could break indentation.
+
+    Returns ``""`` for an empty/whitespace description, so a caller that passes nothing emits
+    byte-for-byte identical TMDL to before this parameter existed (additive, never a regression).
+    """
+    v = " ".join((description or "").split())
+    if not v:
+        return ""
+    return f"/// {v}\n\t"
+
 def generate_measure_tmdl(field_name, formula, dax=None, *, suggestion=None,
-                          translated_by="deterministic"):
+                          translated_by="deterministic", description=None):
     """One measure for the _Measures table. When `dax` is provided the measure carries
     the translated DAX expression; otherwise it stays an inert `= 0` stub. EITHER WAY
     the original Tableau formula is ALWAYS preserved as a TableauFormula annotation --
@@ -302,10 +326,14 @@ def generate_measure_tmdl(field_name, formula, dax=None, *, suggestion=None,
     `suggestion` is an OPTIONAL assisted-translation suggestion dict (``{"pattern", "dax"}``)
     attached ONLY to a stub (`dax` is None): the measure stays inert `= 0` but carries
     `TranslationSuggestion` + `TranslationSuggestionPattern` annotations so a human can review
-    and approve it. The suggestion is NEVER the live expression until approved."""
+    and approve it. The suggestion is NEVER the live expression until approved.
+
+    `description` is an OPTIONAL human-readable description emitted as a leading ``///`` comment so
+    Power BI Q&A / Copilot can ground answers on it. When falsy the TMDL is byte-for-byte identical
+    to before this parameter existed (additive)."""
     expr = dax if dax else "0"
     out = (
-        _tmdl_assignment(f"\n\tmeasure {q(field_name)}", expr)
+        _tmdl_assignment(f"\n\t{_tmdl_desc_prefix(description)}measure {q(field_name)}", expr)
         + f"\t\tlineageTag: {uuid.uuid4()}\n"
     )
     out += tmdl_annotation_value("TableauFormula", formula)
@@ -319,7 +347,7 @@ def generate_measure_tmdl(field_name, formula, dax=None, *, suggestion=None,
 
 def generate_calc_column_tmdl(field_name, formula, dax=None, *, tmdl_type=None,
                               summarize="none", is_hidden=False, suggestion=None,
-                              translated_by="deterministic"):
+                              translated_by="deterministic", description=None):
     """One calculated column for a row-level (dimension) calc -- the column-mode peer of
     ``generate_measure_tmdl``. The block is meant to be spliced onto an existing data table
     (via ``enrich_table_tmdl(..., calc_columns=...)``), so its DAX must resolve in that table's
@@ -340,9 +368,12 @@ def generate_calc_column_tmdl(field_name, formula, dax=None, *, tmdl_type=None,
     The suggestion is NEVER the live expression until approved.
 
     ``tmdl_type`` optionally pins the column ``dataType`` (e.g. ``string``/``int64``); when
-    omitted the engine infers it from the expression (matching the Date table's calc columns)."""
+    omitted the engine infers it from the expression (matching the Date table's calc columns).
+
+    ``description`` is an OPTIONAL human-readable description emitted as a leading ``///`` comment so
+    Power BI Q&A / Copilot can ground answers on it; falsy keeps the TMDL byte-for-byte unchanged."""
     expr = dax if dax else "BLANK()"
-    out = _tmdl_assignment(f"\n\tcolumn {q(field_name)}", expr)
+    out = _tmdl_assignment(f"\n\t{_tmdl_desc_prefix(description)}column {q(field_name)}", expr)
     if is_hidden:
         out += "\t\tisHidden\n"
     if tmdl_type:

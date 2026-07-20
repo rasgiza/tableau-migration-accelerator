@@ -260,10 +260,16 @@ def acquire_token(resource, explicit=None, env_var=None, use_az=False):
     if env_var and os.environ.get(env_var):
         return os.environ[env_var]
     if use_az:
-        out = subprocess.run(
-            ["az", "account", "get-access-token", "--resource", resource,
-             "--query", "accessToken", "-o", "tsv"],
-            capture_output=True, text=True, shell=(os.name == "nt"))
+        try:
+            out = subprocess.run(
+                ["az", "account", "get-access-token", "--resource", resource,
+                 "--query", "accessToken", "-o", "tsv"],
+                capture_output=True, text=True, shell=(os.name == "nt"))
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "the Azure CLI ('az') was not found on PATH. Install it "
+                "(https://aka.ms/azcli), run 'az login', and retry -- or pass --token / "
+                f"set {env_var or 'the token env var'} to skip the CLI entirely.") from exc
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()
         raise RuntimeError(f"az token acquisition failed for {resource}: {out.stderr.strip()}")
@@ -899,16 +905,111 @@ def _run_report_only(args):
     return 0
 
 
+def _load_deploy_config(path):
+    """Read a user-provided ``fabric-deploy.json`` (secret-free) that says *where* and *what* to deploy.
+
+    Schema (all secrets stay out -- auth is ``az`` CLI tokens by default)::
+
+        {
+          "workspace": "Tableau Migration",     # workspace display name OR GUID (required)
+          "auth": "az",                          # "az" (default) -> --use-az ; or "env" -> FABRIC_TOKEN
+          "refresh": true,                       # trigger a refresh after each deploy
+          "finalize": false,                     # bind -> recalc -> refresh -> upgrade-cardinality
+          "gateway_id": null,                    # optional connection/gateway GUID for the bind
+          "base_url": null,                      # optional Fabric API base override
+          "pbip_dir": "output-estate/pbip",      # auto-discover every bundle under here, OR ...
+          "bundles": [                            # ... list explicit PBIP bundle folders (wins over pbip_dir)
+            "output-estate/pbip/Superstore-classic",
+            "output-estate/pbip/RevenueCycleFlat"
+          ]
+        }
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    if not isinstance(cfg, dict):
+        raise SystemExit(f"config {path!r} must be a JSON object")
+    if not cfg.get("workspace"):
+        raise SystemExit(f"config {path!r} is missing required 'workspace' (name or GUID)")
+
+    base = os.path.dirname(os.path.abspath(path))
+
+    def _resolve(p):
+        return p if os.path.isabs(p) else os.path.normpath(os.path.join(base, p))
+
+    bundles = cfg.get("bundles")
+    if bundles:
+        bundles = [_resolve(b) for b in bundles]
+    else:
+        pbip_dir = cfg.get("pbip_dir")
+        if not pbip_dir:
+            raise SystemExit(f"config {path!r} needs either 'bundles' or 'pbip_dir'")
+        pbip_dir = _resolve(pbip_dir)
+        if not os.path.isdir(pbip_dir):
+            raise SystemExit(f"pbip_dir {pbip_dir!r} does not exist")
+        bundles = sorted(
+            os.path.join(pbip_dir, name)
+            for name in os.listdir(pbip_dir)
+            if os.path.isdir(os.path.join(pbip_dir, name))
+        )
+    if not bundles:
+        raise SystemExit(f"config {path!r} resolved to zero PBIP bundles to deploy")
+    cfg["_bundles"] = bundles
+    return cfg
+
+
+def _run_config(config_path, argv_args):
+    """Deploy every PBIP bundle named in a ``fabric-deploy.json`` into one workspace, secret-free."""
+    cfg = _load_deploy_config(config_path)
+    auth = str(cfg.get("auth", "az")).lower()
+    use_az = auth in ("az", "cli", "azure")
+    finalize = bool(cfg.get("finalize", False))
+    refresh = bool(cfg.get("refresh", False)) or finalize
+
+    print(f"[config] {config_path}")
+    print(f"[config] workspace={cfg['workspace']!r}  auth={'az-cli' if use_az else 'env-token'}  "
+          f"refresh={refresh}  finalize={finalize}  bundles={len(cfg['_bundles'])}")
+
+    failures = 0
+    for bundle in cfg["_bundles"]:
+        print(f"\n=== deploy: {os.path.basename(bundle)} ===")
+        bundle_args = argparse.Namespace(**vars(argv_args))
+        bundle_args.pbip = bundle
+        bundle_args.workspace = cfg["workspace"]
+        bundle_args.use_az = use_az
+        bundle_args.refresh = refresh
+        bundle_args.finalize = finalize
+        bundle_args.upgrade_cardinality = finalize or getattr(bundle_args, "upgrade_cardinality", False)
+        bundle_args.gateway_id = cfg.get("gateway_id")
+        if cfg.get("base_url"):
+            bundle_args.base_url = cfg["base_url"]
+        try:
+            _run_pbip(bundle_args)
+        except SystemExit as exc:
+            failures += 1
+            print(f"[error] {os.path.basename(bundle)}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - report and continue the estate
+            failures += 1
+            print(f"[error] {os.path.basename(bundle)}: {exc}")
+
+    total = len(cfg["_bundles"])
+    print(f"\n[config] done: {total - failures}/{total} bundle(s) deployed to "
+          f"workspace {cfg['workspace']!r}")
+    return 1 if failures else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Deploy a rebuilt semantic model to Microsoft Fabric.")
-    src = ap.add_mutually_exclusive_group(required=True)
+    src = ap.add_mutually_exclusive_group(required=False)
     src.add_argument("--model-dir", help="path to an existing <Name>.SemanticModel folder")
     src.add_argument("--tds", help="path to a .tds to build AND deploy (datasource only)")
     src.add_argument("--pbip", help="path to a produced PBIP bundle dir (or its .pbip file) -- "
                                     "deploy the model AND its report (rebound byConnection)")
     src.add_argument("--report-dir", help="path to a <Name>.Report folder -- deploy the report only "
                                           "(requires --semantic-model-id or --semantic-model-name)")
-    ap.add_argument("--workspace", required=True, help="target workspace name or GUID")
+    src.add_argument("--config", help="path to a fabric-deploy.json describing the target workspace "
+                                      "and the PBIP bundle(s) to push (secret-free, az-cli auth)")
+    ap.add_argument("--workspace", help="target workspace name or GUID "
+                                        "(required unless --config supplies it)")
     ap.add_argument("--model-name", help="model display name (defaults to the folder name)")
     ap.add_argument("--semantic-model-id",
                     help="deployed model GUID to rebind a --report-dir report to (byConnection)")
@@ -940,6 +1041,12 @@ def main(argv=None):
     ap.add_argument("--save-model-dir", help="also write the built model here (with --tds)")
     ap.add_argument("--dry-run", action="store_true", help="print the plan without calling Fabric")
     args = ap.parse_args(argv)
+    if args.config:
+        return _run_config(args.config, args)
+    if not (args.model_dir or args.tds or args.pbip or args.report_dir):
+        ap.error("one of --model-dir / --tds / --pbip / --report-dir / --config is required")
+    if not args.workspace:
+        ap.error("--workspace is required (or supply it via --config)")
     if args.finalize:
         args.refresh = True
         args.upgrade_cardinality = True

@@ -44,6 +44,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -59,6 +60,8 @@ try:  # works whether imported as a package or run with scripts/ on sys.path
     from .parameters import parse_parameters
     from .workbook_table_calcs import extract_table_calc_usages, load_workbook_xml
     from .workbook_calc_usage import workbook_calc_usage
+    from .migration_report_html import render_report_html
+    from .copilot_readiness import score_copilot_readiness
     from . import fetch_tds as F
 except ImportError:
     from connection_to_m import (parse_tds, extract_bundled_flatfile, extract_calcs,
@@ -71,6 +74,8 @@ except ImportError:
     from parameters import parse_parameters
     from workbook_table_calcs import extract_table_calc_usages, load_workbook_xml
     from workbook_calc_usage import workbook_calc_usage
+    from migration_report_html import render_report_html
+    from copilot_readiness import score_copilot_readiness
     import fetch_tds as F
 
 
@@ -678,7 +683,7 @@ def _resolve_viz_stage(injected):
 
 
 def _migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir=None, ds_catalog=None,
-                            approved_calc_dax=None):
+                            approved_calc_dax=None, copilot_ready=True):
     """Drive the full per-datasource pipeline. Returns a report detail dict (never raises).
 
     When ``ds_catalog`` is given, a successfully migrated datasource records its source text +
@@ -797,11 +802,12 @@ def _migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir=None, 
             out = assemble_local_import_model(descriptor, model_name=name,
                                               table_csv_paths=table_csv_paths, calcs=calcs,
                                               dim_calcs=dim_calcs, parameters=parameters,
-                                              approved_calc_dax=approved_calc_dax)
+                                              approved_calc_dax=approved_calc_dax,
+                                              copilot_ready=copilot_ready)
         else:
             out = assemble_import_model(descriptor, model_name=name, calcs=calcs, dim_calcs=dim_calcs,
                                         parameters=parameters, approved_calc_dax=approved_calc_dax,
-                                        flatfile_path=flatfile_path)
+                                        flatfile_path=flatfile_path, copilot_ready=copilot_ready)
     except ValueError as exc:  # storage policy / no-columns -> documented needs-storage-decision fallback
         detail.update(status="fallback", storage_mode=None, storage_decision=decision,
                       reason=str(exc),
@@ -912,6 +918,10 @@ def _migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir=None, 
         calc_columns_stubbed=cc_stubbed,
         column_prune=report.get("column_prune"),
         manual_followups=followups,
+        # Copilot-readiness signals (additive): whether enrichment was requested for this datasource
+        # and the Q&A synonym audit the assembler harvested (None when off or when no caption differs).
+        copilot_ready=copilot_ready,
+        linguistic=report.get("linguistic"),
     )
     if ds_catalog is not None:
         ds_catalog[_norm_ds(name)] = {"name": name, "text": text, "safe_base": safe_base,
@@ -974,6 +984,54 @@ def _rebind_report_byPath(parts, model_folder_name):
         doc["datasetReference"] = {"byPath": {"path": target}}
     out["definition.pbir"] = json.dumps(doc, indent=2)
     return out
+
+
+def _rebind_report_to_semantic_models(report_dir, sm_dir):
+    """Repoint a ``reports/<Name>.Report`` definition.pbir at its model under ``semantic_models/``.
+
+    The viz stage bakes byPath ``../<name>.SemanticModel`` -- the canonical PBIP layout where the
+    report and model are SIBLINGS (per resources/viz-rebuild.md). The estate instead nests reports
+    under ``reports/`` and models under ``semantic_models/``, so from ``reports/<Name>.Report`` the
+    model is two levels up and across: ``../../semantic_models/<name>.SemanticModel``. Rewrite the
+    on-disk file so the standalone report actually resolves to (and opens against) its dataset.
+
+    Best-effort and fail-closed: never raises, and leaves the file untouched unless it can name the
+    exact model folder to bind to -- the baked leaf when that model exists on disk, else the sole
+    model in a single-datasource estate. Returns the new relative path, or ``None`` when unchanged.
+    """
+    pbir_path = os.path.join(report_dir, "definition.pbir")
+    try:
+        with open(pbir_path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    ref = doc.get("datasetReference")
+    if not (isinstance(ref, dict) and isinstance(ref.get("byPath"), dict)):
+        return None
+    leaf = os.path.basename((ref["byPath"].get("path") or "").replace("\\", "/"))
+    if not leaf.endswith(".SemanticModel"):
+        return None
+    target = leaf if os.path.isdir(os.path.join(sm_dir, leaf)) else None
+    if target is None:
+        try:
+            models = [d for d in os.listdir(sm_dir)
+                      if d.endswith(".SemanticModel") and os.path.isdir(os.path.join(sm_dir, d))]
+        except OSError:
+            models = []
+        if len(models) == 1:            # single-datasource estate: bind unambiguously
+            target = models[0]
+    if target is None:
+        return None                     # cannot confidently resolve -> leave the file as emitted
+    new_path = "../../semantic_models/" + target
+    if ref["byPath"].get("path") == new_path:
+        return new_path
+    ref["byPath"]["path"] = new_path
+    try:
+        with open(pbir_path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2)
+    except OSError:
+        return None
+    return new_path
 
 
 _FIDELITY_DEFERRAL_MARKERS = (
@@ -2466,6 +2524,11 @@ def _migrate_one_workbook(source, wb_id, viz, reports_dir, used_folders, pbip_di
                 shutil.rmtree(_win_long_path(dest))
             write_model_folder(parts, dest)
             output_folder = f"reports/{folder}"
+            # Repoint the reports/-tree byPath at the model under semantic_models/ (two levels up),
+            # so the standalone report resolves to its dataset instead of a non-existent sibling
+            # (the datasources are written BEFORE the workbooks, so the model is already on disk).
+            _rebind_report_to_semantic_models(
+                dest, os.path.join(os.path.dirname(reports_dir), "semantic_models"))
         except OSError as exc:
             detail.update(viz_status="error", note=f"viz write failed: {exc}")
             return detail
@@ -3046,7 +3109,7 @@ def _write_compile_report(output_dir, compile_report):
 
 def migrate_estate(source, output_dir, *, viz_stage=None, pbip=True, rebind_plan=None,
                    rebind_bind_stage=None, approved_calc_dax=None, viz_advice=False,
-                   second_compile=False, authored=None):
+                   second_compile=False, authored=None, copilot_ready=True):
     """Run the whole estate migration and write the output bundle. Returns the report dict.
 
     ``source`` is any :class:`TableauSource`. ``output_dir`` receives::
@@ -3108,7 +3171,8 @@ def migrate_estate(source, output_dir, *, viz_stage=None, pbip=True, rebind_plan
     ds_catalog = {}
     ds_details = [_migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir,
                                           ds_catalog=ds_catalog,
-                                          approved_calc_dax=approved_calc_dax)
+                                          approved_calc_dax=approved_calc_dax,
+                                          copilot_ready=copilot_ready)
                   for ds_id in source.list_datasources()]
     wb_details = [migrate_workbook(source, write_to=output_dir, wb_id=wb_id, viz_stage=viz,
                                    approved_calc_dax=approved_calc_dax, viz_advice=viz_advice,
@@ -3135,11 +3199,25 @@ def migrate_estate(source, output_dir, *, viz_stage=None, pbip=True, rebind_plan
         "definition_of_done": _definition_of_done(wb_details, pbip_dir is not None),
         "fallbacks": fallbacks,
     }
+    # Copilot / Q&A readiness scorecard (read-only, additive): grade the model this run produced so
+    # the user can see whether it is grounded enough for AI/Copilot. Fail-closed -- a scoring hiccup
+    # must never break a run, and report.json stays valid without the block.
+    try:
+        report["copilot_readiness"] = score_copilot_readiness(report)
+    except Exception:  # pragma: no cover - scorecard is a convenience over the raw facts
+        pass
 
     with open(os.path.join(output_dir, "report.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2, sort_keys=True)
     with open(os.path.join(output_dir, "summary.md"), "w", encoding="utf-8") as fh:
         fh.write(_render_summary_md(report))
+    # Self-contained, offline exec view of the same facts (no server, no CDN, no JS). Best-effort:
+    # the HTML is a convenience over report.json, never a gate -- a render hiccup must not fail a run.
+    try:
+        with open(os.path.join(output_dir, "migration-report.html"), "w", encoding="utf-8") as fh:
+            fh.write(render_report_html(report))
+    except Exception:  # pragma: no cover - report.json is the source of truth; HTML is additive
+        pass
 
     # Opt-in rebind routing. Runs strictly AFTER the canonical report.json / summary.md are written
     # so those artifacts stay byte-identical to a no-plan run; the resolved bindings land only in
@@ -3892,7 +3970,25 @@ def main(argv=None):
                         help="build even if <output> already holds a prior report.json (overwrite "
                              "in place); the default is to STOP so a new run never silently mixes "
                              "with a previous run's stale outputs")
+    parser.add_argument("--no-copilot-ready", action="store_true",
+                        help="disable Copilot-readiness enrichment (Q&A synonyms + honest one-line "
+                             "measure/column descriptions). On by default so the emitted model is "
+                             "grounded for Power BI Q&A / Copilot; pass this to emit the leaner, "
+                             "description-free model instead")
     args = parser.parse_args(argv)
+
+    # Preflight: fail loudly and EARLY on the two things a tester most often gets wrong -- an old
+    # interpreter or a bad/empty input folder -- rather than crashing cryptically mid-run or (worse)
+    # "succeeding" with an empty bundle. os.walk over a missing folder yields nothing, so without
+    # this guard a typo'd -i would produce a green run that migrated zero datasources.
+    if sys.version_info < (3, 11):
+        print(f"[STOP] Python 3.11+ is required; found {sys.version.split()[0]}. "
+              "Re-run with py -3.11 (or a newer python).")
+        return 2
+    if not os.path.isdir(args.input):
+        print(f"[STOP] Input folder not found (or not a directory): {os.path.abspath(args.input)}")
+        print("       Point -i at a folder of exported Tableau .tds / .twb (.tdsx / .twbx) files.")
+        return 2
 
     try:
         approved_calc_dax = _load_approved_dax(args.approved_dax)
@@ -3906,6 +4002,14 @@ def main(argv=None):
     second_compile = bool(args.second_compile or authored)
 
     source = LocalFilesSource(args.input)
+
+    # No Tableau assets in scope -> stop with an actionable message instead of emitting an empty
+    # bundle (or an empty scan) that looks like a successful no-op.
+    if not (source.list_datasources() or source.list_workbooks()):
+        print(f"[STOP] No Tableau assets found under {os.path.abspath(args.input)} "
+              "(looked recursively for .tds / .twb / .tdsx / .twbx).")
+        print("       Export your datasource(s)/workbook(s) into that folder and re-run.")
+        return 2
 
     if args.scan:
         manifest = scan_estate(source)
@@ -3950,7 +4054,8 @@ def main(argv=None):
 
     report = migrate_estate(source, args.output, pbip=not args.no_pbip,
                             approved_calc_dax=approved_calc_dax, viz_advice=args.viz_advice,
-                            second_compile=second_compile, authored=authored)
+                            second_compile=second_compile, authored=authored,
+                            copilot_ready=not args.no_copilot_ready)
     s = report["summary"]
     print(
         f"Datasources: {s['datasources_migrated']}/{s['datasources_total']} migrated "

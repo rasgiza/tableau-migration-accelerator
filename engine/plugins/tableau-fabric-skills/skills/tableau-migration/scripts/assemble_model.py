@@ -721,7 +721,7 @@ def _measures_part(calcs, resolve, consumed=None, param_resolver=None, *,
                    calc_lookup=None, approved_calc_dax=None, synth_measures=None,
                    known_tables=None, table_calc_usages=None, order_resolver=None,
                    flag_measures=None, resolve_for=None, inline_calcs=None,
-                   related_tables=None, conformed_hubs=None):
+                   related_tables=None, conformed_hubs=None, copilot_ready=False):
     """Translate ``calcs`` and render the ``_Measures`` table TMDL + a per-measure report.
 
     ``calcs`` is an iterable of ``{"name": str, "formula": str}``. Calcs whose name is in
@@ -783,6 +783,13 @@ def _measures_part(calcs, resolve, consumed=None, param_resolver=None, *,
         for _k in (_fm.get("source_calc_name"), _fm.get("source_calc_id")):
             if _k:
                 flag_source_lower.add(str(_k).strip().lower())
+    # Copilot-readiness (opt-in): when ``copilot_ready`` is set, each emitted measure carries an
+    # honest one-line ``///`` description -- provenance for a translated measure, an explicit
+    # needs-review flag for an inert stub -- so Power BI Q&A / Copilot can ground answers on it and
+    # a reviewer can spot un-migrated logic at a glance. Default OFF: ``description`` stays None and
+    # the emitted TMDL is byte-for-byte identical to the pre-flag output (every golden test unchanged).
+    def _desc(text):
+        return text if copilot_ready else None
     measures_tmdl = ""
     report = []
     suggestions = []
@@ -894,7 +901,8 @@ def _measures_part(calcs, resolve, consumed=None, param_resolver=None, *,
     for sm in (synth_measures or []):
         measures_tmdl += T.generate_measure_tmdl(
             sm["name"], sm.get("tableau_formula", ""), sm["dax"],
-            translated_by="deterministic (measure-swap aggregation)")
+            translated_by="deterministic (measure-swap aggregation)",
+            description=_desc("Aggregation measure synthesized for a measure-swap field parameter."))
     for calc in calcs or []:
         name, formula = calc["name"], calc.get("formula", "")
         if name.lower() in consumed_lower:
@@ -926,7 +934,9 @@ def _measures_part(calcs, resolve, consumed=None, param_resolver=None, *,
             },
         }
         if dax:
-            measures_tmdl += T.generate_measure_tmdl(name, formula, dax)
+            measures_tmdl += T.generate_measure_tmdl(
+                name, formula, dax,
+                description=_desc("Migrated from a Tableau calculation."))
             report.append(row)
             continue
 
@@ -939,18 +949,23 @@ def _measures_part(calcs, resolve, consumed=None, param_resolver=None, *,
             approved_expr = " ".join(approved_dax.split())  # collapse to one valid DAX line
             measures_tmdl += T.generate_measure_tmdl(
                 name, formula, approved_expr,
-                translated_by="assisted translation (human-approved)")
+                translated_by="assisted translation (human-approved)",
+                description=_desc("Migrated from a Tableau calculation (human-approved assisted translation)."))
             row["status"] = "assisted-approved"
             row["dax"] = approved_expr
             if sugg:
                 row["assisted_pattern"] = sugg["pattern"]
         elif sugg:
-            measures_tmdl += T.generate_measure_tmdl(name, formula, None, suggestion=sugg)
+            measures_tmdl += T.generate_measure_tmdl(
+                name, formula, None, suggestion=sugg,
+                description=_desc("Untranslated Tableau calculation -- an assisted-translation suggestion is pending human review (inert placeholder)."))
             row["status"] = "assisted-suggested"
             row["assisted_suggestion"] = sugg
             suggestions.append({"measure": name, **sugg})
         else:
-            measures_tmdl += T.generate_measure_tmdl(name, formula, None)
+            measures_tmdl += T.generate_measure_tmdl(
+                name, formula, None,
+                description=_desc("Untranslated Tableau calculation -- needs manual review (inert placeholder returning 0)."))
         report.append(row)
     # Emit the translated workbook table calcs (addressing-bearing) after the plain measures. Each
     # preserves its original Tableau formula as ``TableauFormula`` and is tagged with the addressing
@@ -958,14 +973,16 @@ def _measures_part(calcs, resolve, consumed=None, param_resolver=None, *,
     for r in tablecalc_rows:
         measures_tmdl += T.generate_measure_tmdl(
             r["measure"], r["tableau_formula"], r["dax"],
-            translated_by=r.get("translated_by") or "deterministic (workbook addressing)")
+            translated_by=r.get("translated_by") or "deterministic (workbook addressing)",
+            description=_desc("Migrated from a Tableau table calculation (window / running-total addressing)."))
         report.append(r)
     # Emit the synthesized parameter-driven date-window keep-flag measures last. Each supersedes
     # its source calc's plain stub (skipped above) and preserves the original Tableau formula.
     for fm in (flag_measures or []):
         measures_tmdl += T.generate_measure_tmdl(
             fm["measure"], fm.get("tableau_formula", ""), fm["dax"],
-            translated_by=fm.get("translated_by") or "deterministic (parameter-driven date window)")
+            translated_by=fm.get("translated_by") or "deterministic (parameter-driven date window)",
+            description=_desc("Parameter-driven date-window keep-flag migrated from Tableau."))
         report.append(fm["report_row"])
     # View-only quick table calcs (running total, YTD, moving average, ...) are reproduced in the
     # REPORT layer as Power BI Visual Calculations, not model measures -- but each references a
@@ -977,7 +994,8 @@ def _measures_part(calcs, resolve, consumed=None, param_resolver=None, *,
     for br in _visual_calc_base_measures(table_calc_usages, known_tables, report):
         measures_tmdl += T.generate_measure_tmdl(
             br["measure"], br["tableau_formula"], br["dax"],
-            translated_by=br.get("translated_by") or "deterministic (visual-calculation base measure)")
+            translated_by=br.get("translated_by") or "deterministic (visual-calculation base measure)",
+            description=_desc("Base aggregate for a Power BI visual calculation."))
         report.append(br)
     return T.generate_measures_table_tmdl(measures_tmdl), report, suggestions
 
@@ -2407,7 +2425,7 @@ def assemble_import_model(descriptor, *, model_name, calcs=None, dim_calcs=None,
                           hierarchies=None, display_folders=None, rls_roles=None,
                           date_table=True, mark_as_date=True, flatfile_path=None,
                           calc_lookup=None, approved_calc_dax=None, date_range=None,
-                          parameters=None, table_calc_usages=None):
+                          parameters=None, table_calc_usages=None, copilot_ready=False):
     """Assemble the Import/DirectQuery semantic model definition for a parsed descriptor.
 
     Returns ``{"parts": {path: text}, "report": {...}}``. Raises ``ValueError`` if the
@@ -2753,7 +2771,8 @@ def assemble_import_model(descriptor, *, model_name, calcs=None, dim_calcs=None,
         order_resolver=None,
         resolve_for=_measure_scoped_resolver,
         flag_measures=flag_measures, inline_calcs=inline_calcs,
-        related_tables=related_tables, conformed_hubs=conformed_hubs)
+        related_tables=related_tables, conformed_hubs=conformed_hubs,
+        copilot_ready=copilot_ready)
     parts["definition/tables/_Measures.tmdl"] = measures_table
     table_names.append("_Measures")
 
@@ -2839,6 +2858,24 @@ def assemble_import_model(descriptor, *, model_name, calcs=None, dim_calcs=None,
         report["flatfile_header_reconcile"] = header_reconcile
     report["openability_selfcheck"] = check_model_openability(
         parts, flatfile_headers=_gate_flatfile_headers(descriptor, flatfile_path))
+    # Copilot-readiness (opt-in): Power BI Q&A / Copilot map a user's vocabulary onto model fields
+    # through a ``cultureInfo`` linguistic-synonyms part. When ``copilot_ready`` is set, harvest the
+    # Tableau field captions that differ from their model column names into an ``en-US`` culture and
+    # add a ``ref cultureInfo`` line to model.tmdl. Fully additive and byte-identical when off (or
+    # when no caption differs, so no culture is produced). Fail-closed: a hiccup here NEVER breaks
+    # the build -- the model without synonyms is still valid, just less grounded for Q&A.
+    if copilot_ready:
+        try:
+            _ling_fields = _linguistic_fields(descriptor)
+            _culture = L.build_linguistic_culture(_ling_fields)
+            if _culture:
+                parts["definition/cultures/en-US.tmdl"] = _culture
+                _mkey = "definition/model.tmdl"
+                if _mkey in parts and "ref cultureInfo" not in parts[_mkey]:
+                    parts[_mkey] = parts[_mkey].rstrip("\n") + "\n\nref cultureInfo en-US\n"
+                report["linguistic"] = L.linguistic_audit(_ling_fields)
+        except Exception:
+            pass
     return {"parts": parts, "report": report}
 
 
