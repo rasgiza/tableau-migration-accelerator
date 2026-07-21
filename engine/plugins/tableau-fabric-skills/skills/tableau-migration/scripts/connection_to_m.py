@@ -356,6 +356,27 @@ def _odbc_facts(c):
 _EXTRACT_ENGINE_CLASSES = frozenset({"hyper", "dataengine"})
 
 
+def is_extract_backed(descriptor):
+    """True when the datasource's DATA comes from a bundled Tableau extract or a flat file
+    (Excel/CSV) rather than a live database -- i.e. a source whose rows must be LANDED (mirrored to
+    OneLake, or exported) before a model can load them.
+
+    This is the signal the orchestrator uses to route an extract-backed datasource whose bundled
+    data could NOT be materialized (no absolute flat-file path, no landed CSVs -- e.g. a ``.twbx``
+    that packages only a ``.hyper`` cache) onto a completable DirectLake-over-OneLake seam instead
+    of emitting empty Power Query stub partitions (``Source = #table(type table [], {})``) that open
+    but load nothing. A live DB source (``sqlserver`` / ``snowflake`` / ...) is NOT extract-backed:
+    it rebuilds direct-to-source as Import/DirectQuery and never needs a landing step.
+
+    Fail-closed: unknown / missing connection class with no ``is_extract`` marker -> ``False`` (the
+    source keeps its existing storage path); the seam only ever REPLACES an otherwise-empty stub.
+    """
+    if descriptor.get("is_extract"):
+        return True
+    cls = (descriptor.get("connection_class") or "").lower()
+    return cls in FLAT_FILE_CLASSES or cls in _EXTRACT_ENGINE_CLASSES
+
+
 def _live_connection(datasource):
     """Return ``(class, server, dbname, warehouse, http_path, auth_method, named_connection_count)``.
 
