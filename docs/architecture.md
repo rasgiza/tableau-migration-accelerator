@@ -9,7 +9,7 @@ source of truth, Fabric F64).
 ## Design principles
 
 1. **Snowflake stays the source of truth.** No data fork. Fabric reads Snowflake via
-   Mirroring / Shortcuts, and semantic models serve via **DirectLake**.
+   Shortcuts, and semantic models serve via **DirectLake**.
 2. **Automate the mechanical, surface the judgement.** Schema, types, and safe-subset
    calc→DAX are deterministic and auditable. Complex calcs, relationships, and storage-mode
    decisions are explicit human gates — never silently guessed.
@@ -17,6 +17,10 @@ source of truth, Fabric F64).
    to F64 is via **Fabric REST**. Migrations are reproducible and reviewable in PRs.
 4. **Fidelity is provable.** Every migrated measure keeps its original Tableau formula as an
    annotation so reviewers can diff intent vs. translation.
+5. **Modernize, don't replicate.** A migration is *not* a 1:1 copy. Workbooks consolidate into
+   a small set of shared **star-schema** semantic models; the model design is the human 20%.
+   See [semantic-model-best-practices.md](semantic-model-best-practices.md) for the
+   Microsoft-grounded rationale and an honest implemented-vs-human capability matrix.
 
 ---
 
@@ -94,6 +98,12 @@ path (Mirroring vs. Shortcut vs. staged Delta) can change without rewriting the 
 The live-pipeline step points those tables at the OneLake Delta landing of Snowflake. This is
 a deliberate manual/config step (the offline demo proves model+calc generation; the rebind is
 where real data lands).
+
+> **Worked example (real backend):** [real-source-binding-runbook.md](real-source-binding-runbook.md)
+> executes this native-source rebind end-to-end against a real **Azure SQL** database
+> (Snowflake/Fabric-SQL stand-in) — provisioning, Entra-only auth, giving each datasource a
+> resolvable physical descriptor, and re-running so two previously-unbound workbooks flip to
+> model-bound `.pbip`. It also validates the motion against enterprise best practice.
 
 ---
 
