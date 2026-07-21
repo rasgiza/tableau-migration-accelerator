@@ -95,7 +95,7 @@ Patterns that hold for a 150-workbook estate (and are baked into this accelerato
    are the manual tail. Budget human DAX time proportional to *distinct* complex calcs, not
    workbook count.
 5. **Snowflake stays the source of truth.** Land/serve via DirectLake over
-   Mirroring/Shortcuts to Snowflake; don't fork the data. The generated model binds by
+   Shortcuts to Snowflake; don't fork the data. The generated model binds by
    table name + schema so the ingestion path can be swapped without breaking the model.
 6. **Fidelity is validated, not assumed.** Keep the original Tableau formula on every measure
    as an annotation so reviewers can diff intent vs. translation.
