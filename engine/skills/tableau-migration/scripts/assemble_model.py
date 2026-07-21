@@ -28,14 +28,17 @@ from __future__ import annotations
 
 import copy
 import re
+import uuid
 
 try:  # package or scripts-on-path
     from .connection_to_m import (
         build_m_field_resolver,
+        clean_col,
         connection_details_for_bind,
         emit_connection_parameters,
         emit_table_tmdl_m,
         extract_bundled_flatfile,
+        is_extract_backed,
         m_partition_review_reason,
         extract_calcs,
         parse_tds,
@@ -76,10 +79,12 @@ try:  # package or scripts-on-path
 except ImportError:
     from connection_to_m import (
         build_m_field_resolver,
+        clean_col,
         connection_details_for_bind,
         emit_connection_parameters,
         emit_table_tmdl_m,
         extract_bundled_flatfile,
+        is_extract_backed,
         m_partition_review_reason,
         extract_calcs,
         parse_tds,
@@ -3095,6 +3100,117 @@ def assemble_directlake_model(*, model_name, tables, measures_tmdl, expression_n
     return {"parts": parts}
 
 
+# Placeholder OneLake ``Tables`` URL emitted into an extract-backed DirectLake seam when no real
+# lakehouse URL is supplied. The customer (or the estate orchestrator, via ``directlake_url=``)
+# replaces ``<workspace-id>``/``<lakehouse-id>`` after mirroring the source to OneLake as Delta.
+DIRECTLAKE_SEAM_URL_PLACEHOLDER = (
+    "https://onelake.dfs.fabric.microsoft.com/<workspace-id>/<lakehouse-id>/Tables"
+)
+
+# A table's TABLE-LEVEL Power Query partition header (``\tpartition <name> = m``). Only these base
+# source tables are rebound onto DirectLake entities; ``= calculated`` (``_Measures`` / ``Date`` /
+# field-parameter tables) and any already-``= entity`` table are carried through untouched.
+_SEAM_M_PARTITION_RE = re.compile(r"^\tpartition .+ = m\s*$")
+
+
+def _unquote_tmdl_name(name):
+    """Strip the single-quote wrapping (and unescape ``''``) from a TMDL object name; a bare
+    (unquoted) name is returned as-is."""
+    n = (name or "").strip()
+    if len(n) >= 2 and n[0] == "'" and n[-1] == "'":
+        return n[1:-1].replace("''", "'")
+    return n
+
+
+def _model_table_role_refs(model_tmdl):
+    """Return ``(table_names, role_names)`` in EMITTED ORDER parsed from a ``model.tmdl`` body, so a
+    rebuilt model preserves the original table/role sequence (display order)."""
+    tables, roles = [], []
+    for line in (model_tmdl or "").splitlines():
+        s = line.strip()
+        if s.startswith("ref table "):
+            tables.append(_unquote_tmdl_name(s[len("ref table "):]))
+        elif s.startswith("ref role "):
+            roles.append(_unquote_tmdl_name(s[len("ref role "):]))
+    return tables, roles
+
+
+def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlake_url,
+                                            delta_name_of=None, schema_name="dbo"):
+    """Rebind an ``assemble_import_model`` parts dict onto a DirectLake-over-OneLake seam.
+
+    The Import build already produced the FULL model -- typed columns, translated ``_Measures``,
+    calculated columns, hierarchies, display folders, RLS roles, field-parameter / what-if tables and
+    the calculated ``Date`` calendar. This rebinds ONLY the base source tables (those carrying an
+    ``= m`` Power Query partition) onto a DirectLake ``entity`` partition against an already-/to-be-
+    landed Delta table, injects the table-level ``sourceLineageTag`` DirectLake binds on, swaps the
+    connection ``expressions.tmdl`` for the shared ``AzureStorage.DataLake`` expression, and re-emits
+    ``model.tmdl`` with the DirectLake-on-OneLake annotations. Every ``= calculated`` / already-entity
+    table (``_Measures`` / ``Date`` / field parameters) is carried through byte-for-byte, so measure
+    and calc-column fidelity is preserved -- only the DATA binding of the base tables changes.
+
+    Because hierarchies and calculated columns are always injected BEFORE a table's ``partition``
+    line (see ``tmdl_generate.enrich_table_tmdl``), the ``= m`` partition is the trailing block of
+    every base-table part, so swapping it is a safe, structural rebind (no fragile mid-body edit).
+
+    ``delta_name_of(display)`` maps a base table's display name to its landed Delta table name
+    (default ``clean_col(display)`` -- the same name the seeder / mirror lands). ``schema_name`` is
+    the target lakehouse schema (default ``"dbo"``; pass ``None``/``""`` for a classic non-schema
+    lakehouse, matching ``generate_table_tmdl``).
+
+    Returns ``(new_parts, landed)`` where ``landed`` is ``[{"table", "delta_name"}]`` for each
+    rebound base table -- the landing manifest the caller surfaces so a customer / pipeline knows
+    exactly which Delta tables to mirror. When NOTHING is rebindable (no ``= m`` base table) the
+    original parts are returned unchanged with an empty manifest.
+    """
+    delta_name_of = delta_name_of or (lambda disp: clean_col(disp))
+    schema = (schema_name or "").strip()
+    schema_line = f"\t\t\tschemaName: {schema}\n" if schema else ""
+    new_parts = dict(parts)
+    landed = []
+    for path, text in parts.items():
+        if not (path.startswith("definition/tables/") and path.endswith(".tmdl")):
+            continue
+        marker = text.find("\n\tpartition ")
+        if marker == -1:
+            continue
+        part_header_line = text[marker + 1:].split("\n", 1)[0]  # "\tpartition 'p' = m"
+        if not _SEAM_M_PARTITION_RE.match(part_header_line):
+            continue  # only rebind Power Query (= m) partitions; calculated / entity are untouched
+        first_nl = text.find("\n")
+        table_line = text[:first_nl]                # "table 'Orders'"
+        if not table_line.startswith("table "):
+            continue
+        body = text[first_nl:marker]                # "\n<columns + calc columns + hierarchies>"
+        disp = _unquote_tmdl_name(table_line[len("table "):])
+        delta = delta_name_of(disp)
+        src_lineage = f"[{schema}].[{delta}]" if schema else f"[{delta}]"
+        entity = (
+            f"\tpartition {delta} = entity\n"
+            f"\t\tmode: directLake\n"
+            f"\t\tsource\n"
+            f"\t\t\tentityName: {delta}\n"
+            f"{schema_line}"
+            f"\t\t\texpressionSource: {T.q(expression_name)}\n\n"
+        )
+        new_parts[path] = (
+            f"{table_line}\n"
+            f"\tlineageTag: {uuid.uuid4()}\n"
+            f"\tsourceLineageTag: {src_lineage}"
+            f"{body}\n"
+            f"{entity}"
+        )
+        landed.append({"table": disp, "delta_name": delta})
+    if not landed:
+        return dict(parts), []
+    new_parts["definition/expressions.tmdl"] = T.generate_expressions_tmdl(
+        expression_name, directlake_url)
+    table_names, role_names = _model_table_role_refs(parts.get("definition/model.tmdl", ""))
+    new_parts["definition/model.tmdl"] = T.generate_model_tmdl(
+        table_names, expression_name, role_names=role_names or None)
+    return new_parts, landed
+
+
 def fabric_definition_payload(parts):
     """Convert a parts dict into the Fabric *Update Definition* request body.
 
@@ -3907,7 +4023,8 @@ def materialize_bundled_flatfile_data(packaged_source, descriptor, dest_dir, *, 
 def migrate_datasource(source, *, model_name, write_to=None, as_pbip=False, datasource=None,
                        descriptor=None,
                        calcs=None, dim_calcs=None, approved_calc_dax=None, date_range=None,
-                       local_data=None, packaged_source=None, flatfile_dest_dir=None, **kwargs):
+                       local_data=None, packaged_source=None, flatfile_dest_dir=None,
+                       directlake_url=None, directlake_schema="dbo", **kwargs):
     """**One call** from a downloaded datasource to everything needed to land it in Fabric.
 
     ``source`` may be a path to a ``.tdsx``/``.tds``/``.twbx``/``.twb``, raw bytes, or XML text.
@@ -4063,6 +4180,40 @@ def migrate_datasource(source, *, model_name, write_to=None, as_pbip=False, data
             tds_text, model_name=model_name, calcs=calcs, dim_calcs=dim_calcs, select=datasource,
             descriptor=descriptor,
             approved_calc_dax=approved_calc_dax, date_range=date_range, **kwargs)
+
+    # EXTRACT-BACKED -> DirectLake-over-OneLake seam. When the datasource's data comes from a
+    # bundled Tableau extract or a flat file (Excel/CSV) and that data could NOT be materialized --
+    # no absolute flat-file path was staged and no CSVs were landed (e.g. a .twbx packaging only a
+    # .hyper cache) -- the Import base tables are empty/relative-path stubs that open but load
+    # nothing. Rather than ship that, rebind the base tables onto a completable DirectLake seam the
+    # customer finishes by mirroring the source to OneLake as Delta (the ``needs_landing`` manifest
+    # names the exact Delta tables). The full model (measures, calc columns, hierarchies, RLS, Date)
+    # is preserved -- only the base tables' DATA binding changes. A live DB source, a source whose
+    # data DID land, and the needs-decision / import-from-extract fallback are all excluded.
+    if (result.get("parts")
+            and local_data is None and not kwargs.get("flatfile_path")
+            and decision.get("mode") is not None and not decision.get("import_from_extract")
+            and is_extract_backed(descriptor)):
+        _seam_expr = f"DirectLake - {model_name}"
+        _seam_url = directlake_url or DIRECTLAKE_SEAM_URL_PLACEHOLDER
+        _seam_parts, _landed = convert_import_parts_to_directlake_seam(
+            result["parts"], expression_name=_seam_expr, directlake_url=_seam_url,
+            schema_name=directlake_schema)
+        if _landed:
+            result["parts"] = _seam_parts
+            _rep = result.setdefault("report", {})
+            _rebound = {e["table"] for e in _landed}
+            _nr = [e for e in (_rep.get("partitions_needs_review") or [])
+                   if e.get("table") not in _rebound]
+            _rep["partitions_needs_review"] = _nr
+            _rep["partitions_stubbed"] = len(_nr)
+            _rep["directlake_seam"] = {
+                "expression": _seam_expr,
+                "directlake_url": _seam_url,
+                "schema": (directlake_schema or "") or None,
+                "url_is_placeholder": directlake_url is None,
+                "needs_landing": _landed,
+            }
 
     # Additive, honest record of how flat-file data was (or was not) landed, so a caller -- and the
     # estate orchestrator's warnings -- never silently ship a model that opens but loads no data.
