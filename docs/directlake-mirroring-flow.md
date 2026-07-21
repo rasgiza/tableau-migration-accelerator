@@ -43,7 +43,7 @@ is deployed, because the accelerator is *faithful‑or‑stub*: it types the mod
 
 ```mermaid
 flowchart TD
-    A["Azure SQL: tabmigdb<br/>dbo.Orders (Superstore, +more)"] -->|"1. MIRROR / LAND (Fabric, zero-ETL or Spark notebook)"| B["OneLake Delta<br/>TableaumigrationLH/Tables/ in the workspace"]
+    A["Azure SQL: tabmigdb<br/>dbo.Orders (Superstore, +more)"] -->|"1. MIRROR (Fabric portal UI, zero-ETL) — MANUAL"| B["OneLake Delta<br/>Mirrored DB → shortcut into TableaumigrationLH/Tables/"]
     B --> S["Landed schema known:<br/>Tables/orders, ..."]
     S -->|"2. MIGRATE (accelerator)<br/>reads Tableau .twb + landed schema"| G["DirectLake .pbip<br/>directlake_url = OneLake Tables path"]
     G -->|"3. DEPLOY (deploy_to_fabric.py)"| D["Live DirectLake report in tableaumigration"]
@@ -60,15 +60,60 @@ flowchart TD
 The version already run successfully (4/7 workbooks bound) used **DirectQuery** — no mirror.
 Mirroring is required **only because DirectLake was chosen**.
 
-### Mirror via the UI (recommended for the demo)
+### Mirror via the UI — the manual step the user performs
 
-The source server is **Entra‑only** (no password), which makes REST‑API mirror connections
-fiddly. The Fabric portal UI is the reliable and visually compelling path:
+There is **no clean REST API** to stand up Azure SQL mirroring (the source here is
+**Entra‑only**, no password, which makes any API connection route unreliable). So **this one
+step is done by hand in the Fabric portal.** Everything before it (migrate) and after it
+(generate DirectLake model, deploy) is automated — the mirror is the single human click‑path.
 
-> **New → Mirrored Azure SQL Database → point at `sql-tabmig-ysh95n` / `tabmigdb` → select the tables → Create.**
+**Do this in the `tableaumigration` workspace:**
 
-Once the mirror shows **Replicated**, grab its OneLake `Tables/` path and run the accelerator
-in DirectLake mode against it.
+1. **New → Mirrored Azure SQL Database.**
+   > **Pick the right mirror type.** The source here is an **Azure SQL logical server**
+   > (`*.database.windows.net`, created via `az sql server`), so the correct choice is
+   > **Mirrored Azure SQL Database** — *not* **Mirrored SQL Server**, which is only for
+   > SQL Server 2025 running on‑prem / on a VM / Arc‑enabled.
+2. **New connection** to the source:
+   - Server: `sql-tabmig-ysh95n.database.windows.net`
+   - Database: `tabmigdb`
+   - Authentication: **Organizational account** (Entra) — sign in as the same admin.
+3. **Select the tables** to replicate — at minimum `dbo.Orders` (add others as the demo grows).
+4. **Create.** Wait until each table shows **Replicated** (initial snapshot, then continuous).
+
+> **Prereq 1 — system‑assigned managed identity (SAMI).** Mirroring an Azure SQL Database
+> requires the **logical server's system‑assigned managed identity to be enabled and set as
+> the *primary* identity**. Without it the mirror fails with:
+> *"Please turn on the system-assigned managed identity and set it as the primary identity
+> for your SQL Server."* Enable it once with az CLI:
+>
+> ```bash
+> az sql server update -g rg-tableau-migration -n sql-tabmig-ysh95n -i --identity-type SystemAssigned
+> ```
+>
+> With no user‑assigned identity present, `SystemAssigned` is automatically the primary.
+> Verify with `az sql server show ... --query identity.type` → `SystemAssigned`.
+
+> **Prereq 2 — network reachability:** the SQL server must allow Fabric to reach it —
+> `publicNetworkAccess = Enabled` **and** the firewall setting *"Allow Azure services and
+> resources to access this server"* turned on (or the workspace's outbound IPs allow‑listed).
+
+### After mirroring: shortcut the tables into the lakehouse
+
+Mirroring lands Delta inside a **Mirrored Database** item — *not* automatically inside
+`TableaumigrationLH`. To make those tables show up under the lakehouse `Tables/` path that
+`directlake_url` points at, add a **shortcut**:
+
+> In **`TableaumigrationLH` → Tables → New shortcut → Microsoft OneLake → the Mirrored
+> Database → select the mirrored tables.**
+
+(Alternatively, point `directlake_url` straight at the Mirrored Database's own OneLake
+`Tables/` path and skip the shortcut — either lands the model on the same Delta.)
+
+**Then hand back one thing:** confirmation the tables are visible under
+`TableaumigrationLH/Tables/` (or the Mirrored DB's `Tables/` path). That is the signal the
+automated steps 2–3 can resume — generate the DirectLake model typed from the landed schema
+and deploy it.
 
 ---
 
