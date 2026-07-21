@@ -88,11 +88,19 @@ step is done by hand in the Fabric portal.** Everything before it (migrate) and 
 > for your SQL Server."* Enable it once with az CLI:
 >
 > ```bash
-> az sql server update -g rg-tableau-migration -n sql-tabmig-ysh95n -i --identity-type SystemAssigned
+> az sql server update -g rg-tableau-migration -n sql-tabmig-ysh95n --identity-type SystemAssigned
 > ```
 >
-> With no user‑assigned identity present, `SystemAssigned` is automatically the primary.
-> Verify with `az sql server show ... --query identity.type` → `SystemAssigned`.
+> (Note: `--assign-identity` / `-i` is **not** accepted by `az sql server update` in current
+> CLI builds — use `--identity-type SystemAssigned` alone.) With no user‑assigned identity
+> present, `SystemAssigned` is automatically the primary. Verify with
+> `az sql server show -g rg-tableau-migration -n sql-tabmig-ysh95n --query identity.type -o tsv`
+> → `SystemAssigned`.
+>
+> **If SAMI already shows `SystemAssigned` but the mirror still throws the same error**, it is
+> an identity‑propagation lag on the Fabric side — **wait ~1–2 min and retry the mirror
+> creation**; re‑running the `--identity-type SystemAssigned` update is a harmless no‑op that
+> re‑asserts the primary designation.
 
 > **Prereq 2 — network reachability:** the SQL server must allow Fabric to reach it —
 > `publicNetworkAccess = Enabled` **and** the firewall setting *"Allow Azure services and
