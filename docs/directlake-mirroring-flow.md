@@ -24,16 +24,29 @@ data is a Fabric concern and stays out of the stdlib engine by design.
 
 ## 2. The DirectLake flow
 
+### Prerequisite — create the workspace and lakehouse *first*
+
+> **Before you run any code**, the target **Fabric workspace** and a **Lakehouse** inside it
+> must already exist. The DirectLake model is nothing but pointers into a lakehouse's OneLake
+> `Tables/` path, and the mirror/land step needs somewhere to write Delta — so both are
+> **inputs**, not outputs. The accelerator never creates them.
+>
+> 1. In the Fabric portal, create a **workspace** on a Fabric capacity (e.g. `tableaumigration`).
+> 2. Inside it, create a **Lakehouse** (e.g. `TableaumigrationLH`).
+> 3. Copy the lakehouse's OneLake `Tables/` path — that becomes `directlake_url`.
+>
+> DirectQuery/Import need neither of these; they are required **only** for the DirectLake path.
+
 For **DirectLake**, the data must physically land as Delta in OneLake **before** the model
 is deployed, because the accelerator is *faithful‑or‑stub*: it types the model from the
 **actual landed Delta schema** and never guesses.
 
 ```mermaid
 flowchart TD
-    A["Azure SQL: tabmigdb<br/>Orders + ClaimsFlat (+ more)"] -->|"1. MIRROR (Fabric UI, zero-ETL)"| B["OneLake Delta<br/>.../Tables/ in the workspace"]
-    B --> S["Landed schema known:<br/>Tables/orders, Tables/claimsflat, ..."]
+    A["Azure SQL: tabmigdb<br/>dbo.Orders (Superstore, +more)"] -->|"1. MIRROR / LAND (Fabric, zero-ETL or Spark notebook)"| B["OneLake Delta<br/>TableaumigrationLH/Tables/ in the workspace"]
+    B --> S["Landed schema known:<br/>Tables/orders, ..."]
     S -->|"2. MIGRATE (accelerator)<br/>reads Tableau .twb + landed schema"| G["DirectLake .pbip<br/>directlake_url = OneLake Tables path"]
-    G -->|"3. DEPLOY (deploy_to_fabric.py)"| D["Live DirectLake report in Fabric"]
+    G -->|"3. DEPLOY (deploy_to_fabric.py)"| D["Live DirectLake report in tableaumigration"]
 ```
 
 ### When is mirroring needed?
@@ -119,11 +132,13 @@ reports can bind to.
 
 | Resource | Value |
 |---|---|
-| Fabric capacity | `hlsfabricdemo` (F128, westus3) |
-| Fabric workspace | `tableau-directlake-demo` (`abde4b51-c6b2-4861-96cf-833857c7cf95`) |
-| Lakehouse (fallback landing) | `2ba6e4e7-7f33-40fb-aff4-a6c60815c0d0` |
-| OneLake `Tables/` (`directlake_url`) | `https://onelake.dfs.fabric.microsoft.com/abde4b51.../2ba6e4e7.../Tables` |
+| Fabric workspace | `tableaumigration` (`ad36bc5f-ee17-439b-af0c-a867904980f4`) |
+| Lakehouse (landing target) | `TableaumigrationLH` (`c569eabc-bb15-4923-9c87-808c163f2c8d`) |
+| OneLake `Tables/` (`directlake_url`) | `https://onelake.dfs.fabric.microsoft.com/ad36bc5f-ee17-439b-af0c-a867904980f4/c569eabc-bb15-4923-9c87-808c163f2c8d/Tables` |
 | Azure SQL source | `sql-tabmig-ysh95n.database.windows.net` / `tabmigdb` (Entra‑only, GeneralPurpose Serverless) |
+
+> **Both the workspace and the lakehouse above were created in the Fabric portal *before* any
+> code ran** — see the prerequisite in §2. They are inputs to the deploy, never created by it.
 
 ---
 
@@ -137,7 +152,7 @@ Plan:
 1. **Seed more Azure SQL tables** in `tabmigdb` (e.g. `Patients`, `Providers`, `Payers`,
    `Encounters`, `Departments`) so there is more to mirror.
 2. **Add Tableau workbooks** over those tables to reach 10 SQL‑backed workbooks.
-3. **Mirror** all the tables into `tableau-directlake-demo`.
+3. **Mirror / land** all the tables into `tableaumigration` (`TableaumigrationLH`).
 4. **Run the accelerator** in DirectLake mode against the landed Delta.
 
 This directly demonstrates: more source tables → more OneLake Delta → more shared semantic
