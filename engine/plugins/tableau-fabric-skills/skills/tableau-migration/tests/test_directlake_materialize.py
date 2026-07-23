@@ -125,3 +125,60 @@ def test_build_table_view_without_schema():
     out = M.build_table_view("Orders", [{"name": "Rev", "dax": "'Orders'[Sales]"}], schema=None)
     assert "FROM `Orders`" in out["sql"]
     assert "CREATE OR REPLACE TABLE `Orders_enriched` AS" in out["sql"]
+
+
+# --------------------------------------------------------------------- consolidated script builder
+def _stripped(*tables):
+    """Build a fake ``stripped_calc_columns`` list from (name, [(col, dax)]) tuples."""
+    out = []
+    for name, cols in tables:
+        out.append({
+            "table": name,
+            "columns": [c for c, _ in cols],
+            "materialization": M.build_table_view(name, [{"name": c, "dax": d} for c, d in cols]),
+        })
+    return out
+
+
+def test_materialization_script_consolidates_tables():
+    stripped = _stripped(
+        ("Orders", [("Rev", "'Orders'[Sales]")]),
+        ("People", [("Up", "UPPER('People'[Name])")]),
+    )
+    out = M.build_materialization_script(stripped, model_name="Superstore")
+    assert out["tables"] == 2 and out["covered"] == 2 and out["needs_manual"] == 0
+    assert "-- Model: Superstore" in out["sql"]
+    assert "-- ===== Table: Orders =====" in out["sql"]
+    assert "-- ===== Table: People =====" in out["sql"]
+    assert out["sql"].count("CREATE OR REPLACE TABLE") == 2
+
+
+def test_materialization_script_counts_manual_and_keeps_review_todos():
+    stripped = _stripped(("Orders", [
+        ("Rev", "'Orders'[Sales]"),
+        ("Year", "RELATED('Date'[Year])"),
+    ]))
+    out = M.build_materialization_script(stripped)
+    assert out["tables"] == 1 and out["covered"] == 1 and out["needs_manual"] == 1
+    assert "-- REVIEW [Year]" in out["sql"]
+    assert "-- Model:" not in out["sql"]  # omitted when model_name is None
+
+
+def test_materialization_script_includes_review_only_table():
+    # An all-manual table produces no CREATE block, only a REVIEW comment. It is STILL included
+    # (honest -- the reviewer sees the untranslated work) with covered=0.
+    stripped = _stripped(("Orders", [("Year", "RELATED('Date'[Year])")]))
+    out = M.build_materialization_script(stripped)
+    assert out is not None and out["covered"] == 0 and out["needs_manual"] == 1
+    assert "-- REVIEW [Year]" in out["sql"]
+
+
+def test_materialization_script_empty_input_is_none():
+    assert M.build_materialization_script([]) is None
+    assert M.build_materialization_script(None) is None
+
+
+def test_materialization_script_skips_entries_without_materialization():
+    stripped = [{"table": "Orders", "columns": ["X"]}]  # no materialization key
+    assert M.build_materialization_script(stripped) is None
+

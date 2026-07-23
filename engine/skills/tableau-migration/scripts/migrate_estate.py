@@ -58,6 +58,7 @@ try:  # works whether imported as a package or run with scripts/ on sys.path
                                  write_local_pbip, migrate_datasource, list_workbook_datasources,
                                  configure_directlake_seam,
                                  _win_long_path)
+    from .directlake_materialize import build_materialization_script
     from .parameters import parse_parameters
     from .workbook_table_calcs import extract_table_calc_usages, load_workbook_xml
     from .workbook_calc_usage import workbook_calc_usage
@@ -73,6 +74,7 @@ except ImportError:
                                 write_local_pbip, migrate_datasource, list_workbook_datasources,
                                 configure_directlake_seam,
                                 _win_long_path)
+    from directlake_materialize import build_materialization_script
     from parameters import parse_parameters
     from workbook_table_calcs import extract_table_calc_usages, load_workbook_xml
     from workbook_calc_usage import workbook_calc_usage
@@ -2365,6 +2367,27 @@ def _build_datasource_pbip(entry, wb_detail, twb_text, result, ds, *, label, mod
     _dl_seam = res_report.get("directlake_seam")
     if _dl_seam:
         entry["directlake_seam"] = _dl_seam
+        # Emit the generated upstream materialization as a REAL, runnable Spark SQL artifact next to
+        # the .pbip -- not just prose in the HTML report -- so the customer can run it directly in a
+        # Fabric Lakehouse notebook to create the `<table>_enriched` Delta tables. Never fails the
+        # build: a write error is recorded as a warning, and no artifact is written when nothing is
+        # materializable.
+        try:
+            _mat = build_materialization_script(
+                _dl_seam.get("stripped_calc_columns"), model_name=model_safe)
+            if _mat and _mat.get("sql"):
+                _sql_path = os.path.join(dest, "directlake-materialization.sql")
+                with open(_win_long_path(_sql_path), "w", encoding="utf-8") as _fh:
+                    _fh.write(_mat["sql"])
+                entry["materialization_script"] = {
+                    "path": os.path.join(folder_rel, "directlake-materialization.sql"),
+                    "tables": _mat["tables"],
+                    "covered": _mat["covered"],
+                    "needs_manual": _mat["needs_manual"],
+                }
+        except OSError as _exc:
+            warns.append(_PBIP_WARN + f"could not write directlake-materialization.sql "
+                         f"({type(_exc).__name__}: {_exc})")
     # Surface the model's structural openability self-check (produced by the datasource build) onto the
     # entry so the workbook definition-of-done can FAIL LOUD when a report bound to a non-openable model
     # (e.g. a duplicate column that survived to TMDL) is produced -- a built .pbip is not the same as an
