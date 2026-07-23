@@ -12,6 +12,7 @@ import connection_to_m as C
 from assemble_model import (
     migrate_datasource,
     convert_import_parts_to_directlake_seam,
+    configure_directlake_seam,
     DIRECTLAKE_SEAM_URL_PLACEHOLDER,
 )
 
@@ -116,13 +117,16 @@ def test_seam_records_landing_manifest_with_placeholder_url():
 
 def test_seam_honors_explicit_directlake_url_and_schema():
     url = "https://onelake.dfs.fabric.microsoft.com/ws/lh/Tables"
-    res = _build(EXCEL_DS, directlake_url=url, directlake_schema=None)
+    res = _build(EXCEL_DS, directlake_url=url, directlake_schema="")
     parts = res["parts"]
     orders = parts["definition/tables/Orders.tmdl"]
     # classic (non-schema) lakehouse: no schemaName line, unqualified lineage
     assert "schemaName:" not in orders
     assert "sourceLineageTag: [Orders]" in orders
-    assert url in parts["definition/expressions.tmdl"]
+    # the shared expression is normalised to the OneLake *item root* (no trailing /Tables) --
+    # Direct-Lake-on-OneLake rejects a /Tables-suffixed source; entity partitions navigate down.
+    assert 'AzureStorage.DataLake("https://onelake.dfs.fabric.microsoft.com/ws/lh"' in parts["definition/expressions.tmdl"]
+    assert "/Tables" not in parts["definition/expressions.tmdl"]
     seam = res["report"]["directlake_seam"]
     assert seam["url_is_placeholder"] is False
     assert seam["directlake_url"] == url
@@ -137,6 +141,50 @@ def test_live_sql_source_stays_import_not_seam():
     assert "mode: directLake" not in orders
     assert "= entity" not in orders
     assert "directlake_seam" not in res["report"]
+
+
+# =============================================================================
+# Process-wide estate seam target (configure_directlake_seam)
+# =============================================================================
+def test_configured_estate_target_applies_without_explicit_arg():
+    url = "https://onelake.dfs.fabric.microsoft.com/ws2/mirror/Tables"
+    prev = configure_directlake_seam(url, schema="dbo")
+    try:
+        res = _build(EXCEL_DS)  # no explicit directlake_url
+        orders = res["parts"]["definition/tables/Orders.tmdl"]
+        assert "sourceLineageTag: [dbo].[Orders]" in orders
+        # expression normalised to the item root (trailing /Tables stripped)
+        assert "https://onelake.dfs.fabric.microsoft.com/ws2/mirror" in res["parts"]["definition/expressions.tmdl"]
+        assert "/Tables" not in res["parts"]["definition/expressions.tmdl"]
+        seam = res["report"]["directlake_seam"]
+        assert seam["directlake_url"] == url
+        assert seam["url_is_placeholder"] is False
+    finally:
+        configure_directlake_seam(*prev)
+
+
+def test_explicit_arg_overrides_configured_target():
+    configured = "https://onelake.dfs.fabric.microsoft.com/ws2/mirror/Tables"
+    explicit = "https://onelake.dfs.fabric.microsoft.com/ws3/lh3/Tables"
+    prev = configure_directlake_seam(configured)
+    try:
+        res = _build(EXCEL_DS, directlake_url=explicit)
+        # item-root normalised: the explicit target's root wins, the configured one is absent
+        assert "https://onelake.dfs.fabric.microsoft.com/ws3/lh3" in res["parts"]["definition/expressions.tmdl"]
+        assert "ws2/mirror" not in res["parts"]["definition/expressions.tmdl"]
+        assert "/Tables" not in res["parts"]["definition/expressions.tmdl"]
+    finally:
+        configure_directlake_seam(*prev)
+
+
+def test_placeholder_when_nothing_configured():
+    # ensure a clean slate even if a prior test leaked state
+    prev = configure_directlake_seam(None)
+    try:
+        res = _build(EXCEL_DS)
+        assert res["report"]["directlake_seam"]["url_is_placeholder"] is True
+    finally:
+        configure_directlake_seam(*prev)
 
 
 # =============================================================================
@@ -165,9 +213,11 @@ def test_converter_only_rebinds_m_partitions():
         "definition/model.tmdl": "model Model\nref table Orders\nref table _Measures\n",
         "definition/expressions.tmdl": "expression X = 1\n",
     }
-    new_parts, landed = convert_import_parts_to_directlake_seam(
+    new_parts, landed, stripped, calendar = convert_import_parts_to_directlake_seam(
         parts, expression_name="DL", directlake_url="https://onelake/Tables")
     assert landed == [{"table": "Orders", "delta_name": "Orders"}]
+    assert stripped == []  # Orders had only a physical column, nothing to strip
+    assert calendar == []  # no CALENDARAUTO in this model
     # Orders rebound
     assert "partition Orders = entity" in new_parts["definition/tables/Orders.tmdl"]
     assert "#table(type table [], {})" not in new_parts["definition/tables/Orders.tmdl"]
@@ -179,12 +229,121 @@ def test_converter_only_rebinds_m_partitions():
     assert model.index("ref table Orders") < model.index("ref table _Measures")
 
 
+def test_converter_strips_calc_columns_from_directlake_table():
+    # Direct Lake tables cannot carry calculated columns -- the converter must drop them (recording
+    # the names) while preserving physical columns and hierarchies, so the entity table saves.
+    imp_orders = (
+        "table Orders\n"
+        "\tcolumn Sales\n"
+        "\t\tdataType: double\n"
+        "\t\tsourceColumn: Sales\n\n"
+        "\tcolumn 'Product Name'\n"
+        "\t\tdataType: string\n"
+        "\t\tsourceColumn: Product Name\n\n"
+        "\tcolumn Manufacturer = SWITCH(TRUE(),\n"
+        "\t\t\t'Orders'[Product Name] = \"X\", \"Acme\",\n"
+        "\t\t\t\"Other\")\n"
+        "\t\tdataType: string\n\n"
+        "\tcolumn 'Day - Order Date' = DAY('Orders'[Order Date])\n"
+        "\t\tdataType: int64\n\n"
+        "\tpartition Orders = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource =\n"
+        "\t\t\tlet Source = #table(type table [], {}) in Source\n\n"
+    )
+    parts = {
+        "definition/tables/Orders.tmdl": imp_orders,
+        "definition/model.tmdl": "model Model\nref table Orders\n",
+        "definition/expressions.tmdl": "expression X = 1\n",
+    }
+    new_parts, landed, stripped, calendar = convert_import_parts_to_directlake_seam(
+        parts, expression_name="DL", directlake_url="https://onelake/Tables")
+    orders = new_parts["definition/tables/Orders.tmdl"]
+    assert landed == [{"table": "Orders", "delta_name": "Orders"}]
+    # the two calc columns are recorded and removed; physical columns survive
+    assert len(stripped) == 1 and stripped[0]["table"] == "Orders"
+    assert stripped[0]["columns"] == ["Manufacturer", "Day - Order Date"]
+    # each stripped column is routed to a remediation bucket (both are row-level deterministic
+    # SWITCH / DAY expressions -> materialize upstream in the Lakehouse).
+    rem = stripped[0]["remediation"]
+    assert rem["counts"]["materialize_upstream"] == 2
+    assert [r["name"] for r in rem["buckets"]["materialize_upstream"]] == ["Manufacturer", "Day - Order Date"]
+    assert "= SWITCH" not in orders and "= DAY" not in orders
+    assert "Manufacturer" not in orders and "Day - Order Date" not in orders
+    assert "column Sales" in orders and "column 'Product Name'" in orders
+    assert "partition Orders = entity" in orders and "mode: directLake" in orders
+
+
 def test_converter_no_m_partition_is_noop():
     parts = {
         "definition/tables/_Measures.tmdl": "table _Measures\n\tpartition _Measures = calculated\n",
         "definition/model.tmdl": "model Model\nref table _Measures\n",
     }
-    new_parts, landed = convert_import_parts_to_directlake_seam(
+    new_parts, landed, stripped, calendar = convert_import_parts_to_directlake_seam(
         parts, expression_name="DL", directlake_url="https://onelake/Tables")
     assert landed == []
+    assert stripped == []
+    assert calendar == []
     assert new_parts == parts
+
+
+def test_converter_neutralizes_calendarauto_on_directlake_seam():
+    # CALENDARAUTO() implicitly scans DirectLake date columns -- the engine rejects a calculated
+    # table that binds to the DirectLake source. Once a base table is rebound onto DirectLake, the
+    # converter must rewrite CALENDARAUTO() to a bounded CALENDAR() and record the change.
+    imp_orders = (
+        "table Orders\n"
+        "\tcolumn Sales\n"
+        "\t\tdataType: double\n"
+        "\t\tsourceColumn: Sales\n\n"
+        "\tpartition Orders = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource =\n"
+        "\t\t\tlet Source = #table(type table [], {}) in Source\n\n"
+    )
+    date_tbl = (
+        "table Date\n"
+        "\tcolumn Date\n"
+        "\t\tdataType: dateTime\n\n"
+        "\tpartition Date = calculated\n"
+        "\t\tmode: import\n"
+        "\t\tsource = CALENDARAUTO()\n"
+    )
+    parts = {
+        "definition/tables/Orders.tmdl": imp_orders,
+        "definition/tables/Date.tmdl": date_tbl,
+        "definition/model.tmdl": "model Model\nref table Orders\nref table Date\n",
+        "definition/expressions.tmdl": "expression X = 1\n",
+    }
+    new_parts, landed, stripped, calendar = convert_import_parts_to_directlake_seam(
+        parts, expression_name="DL", directlake_url="https://onelake/Tables")
+    date_out = new_parts["definition/tables/Date.tmdl"]
+    assert "CALENDARAUTO" not in date_out
+    assert "CALENDAR(DATE(2010, 1, 1), DATE(2035, 12, 31))" in date_out
+    assert calendar == [{
+        "table": "Date",
+        "from": "CALENDARAUTO()",
+        "to": "CALENDAR(DATE(2010, 1, 1), DATE(2035, 12, 31))",
+    }]
+    # the Date column and partition structure are otherwise preserved
+    assert "column Date" in date_out and "partition Date = calculated" in date_out
+
+
+def test_converter_leaves_calendarauto_when_nothing_rebound():
+    # With no DirectLake rebind (no = m base table) there is no DirectLake source to bind to, so
+    # CALENDARAUTO() is correct and must be left untouched.
+    date_tbl = (
+        "table Date\n"
+        "\tpartition Date = calculated\n"
+        "\t\tmode: import\n"
+        "\t\tsource = CALENDARAUTO()\n"
+    )
+    parts = {
+        "definition/tables/Date.tmdl": date_tbl,
+        "definition/model.tmdl": "model Model\nref table Date\n",
+    }
+    new_parts, landed, stripped, calendar = convert_import_parts_to_directlake_seam(
+        parts, expression_name="DL", directlake_url="https://onelake/Tables")
+    assert landed == []
+    assert calendar == []
+    assert new_parts["definition/tables/Date.tmdl"] == date_tbl
