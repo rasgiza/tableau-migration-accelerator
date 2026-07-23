@@ -18,8 +18,18 @@ output-real/
 output-tablecalc/
 output-estate/
 output-newuser/
+output-directlake/
 my-test-estate/
 my-test-output/
+my-test-votd/
+
+# Local DirectLake conversion inputs (customer workbooks staged for a run)
+_dl_in/
+_votd_in/
+
+# Root-level scratch scripts / probes / dumps (regenerable, not part of the engine)
+/_*.py
+/_*.jsonl
 
 # Demo-source originals (backups of downloaded workbooks before repoint)
 _estate_originals/

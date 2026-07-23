@@ -205,6 +205,19 @@ def test_generated_expressions_tmdl_lints_clean():
     assert lint_tmdl_text(expr) == []
 
 
+def test_expressions_tmdl_points_at_item_root_not_tables():
+    # Direct-Lake-on-OneLake requires the shared expression to reference the OneLake
+    # *item root* (.../<workspaceId>/<itemId>); the entity partitions navigate down to
+    # Tables/<entity> themselves via HierarchicalNavigation=true. A trailing /Tables
+    # segment makes Fabric reject the source at import ("requires a valid OneLake data
+    # source"), so the generator must strip it regardless of what the caller passes.
+    root = "https://onelake.dfs.fabric.microsoft.com/ws-guid/item-guid"
+    for supplied in (root, root + "/Tables", root + "/Tables/", root + "/tables"):
+        expr = generate_expressions_tmdl("DirectLake - X", supplied)
+        assert f'AzureStorage.DataLake("{root}", [HierarchicalNavigation=true])' in expr
+        assert "/Tables" not in expr and "/tables" not in expr
+
+
 def test_generated_database_and_relationships_lint_clean():
     assert lint_tmdl_text(generate_database_tmdl()) == []
     rels = generate_relationships_tmdl([

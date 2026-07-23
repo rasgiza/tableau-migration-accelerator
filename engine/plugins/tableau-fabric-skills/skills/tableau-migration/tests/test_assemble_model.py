@@ -1334,6 +1334,56 @@ def test_cross_table_sibling_reference_stays_stub():
     assert rows["X"]["dax"] is None
 
 
+def test_exact_duplicate_calc_is_deduped_once():
+    # A consolidated multi-datasource workbook can surface the SAME dimension calc from more than one
+    # island. Two identically named calculated columns on one home table is a TMDL Fabric rejects on
+    # import ("objects cannot be merged because both declare the same property"). An exact duplicate
+    # (same name + same formula) must be emitted exactly once, and the per-column report carries one row.
+    base = {"Product Name": ("Orders", "Product_Name", "string")}
+    resolve = lambda c: base.get(c)
+    dim = [
+        {"name": "Manufacturer", "formula": 'IF([Product Name] = "Acme Box", "Acme", "Other")'},
+        {"name": "Manufacturer", "formula": 'IF([Product Name] = "Acme Box", "Acme", "Other")'},
+    ]
+    by_table, report, _ = _calc_columns_part(dim, resolve, "Orders", known_tables={"Orders"})
+    assert by_table["Orders"].count("column Manufacturer") == 1
+    assert [r["column"] for r in report].count("Manufacturer") == 1
+
+
+def test_same_name_different_formula_on_one_table_keeps_first():
+    # Two DIFFERENT-formula calcs that share a caption and both resolve to the same fact table (the real
+    # VOTD ``Manufacturer`` case) cannot coexist in TMDL. Keep the FIRST landing and record the second
+    # as a ``skipped-duplicate`` report row for audit -- never emit two same-named columns on one table.
+    base = {"Product Name": ("Orders", "Product_Name", "string")}
+    resolve = lambda c: base.get(c)
+    dim = [
+        {"name": "Manufacturer", "formula": 'IF([Product Name] = "A", "Acme", "Other")'},
+        {"name": "Manufacturer", "formula": 'IF([Product Name] = "B", "Beta", "Other")'},
+    ]
+    by_table, report, _ = _calc_columns_part(dim, resolve, "Orders", known_tables={"Orders"})
+    assert by_table["Orders"].count("column Manufacturer") == 1
+    statuses = [r["status"] for r in report if r["column"] == "Manufacturer"]
+    assert statuses.count("skipped-duplicate") == 1
+    # the kept column carries the FIRST formula
+    assert '"Acme"' in by_table["Orders"]
+    assert '"Beta"' not in by_table["Orders"]
+
+
+def test_same_name_calc_on_different_tables_both_land():
+    # Guard is per-target-table: a genuinely distinct calc of the same name resolving to a DIFFERENT
+    # table must still land -- TMDL allows same-named columns on different tables (paths differ).
+    base = {"OCol": ("Orders", "OCol", "string"), "PCol": ("People", "PCol", "string")}
+    resolve = lambda c: base.get(c)
+    dim = [
+        {"name": "Tag", "formula": "UPPER([OCol])"},
+        {"name": "Tag", "formula": "UPPER([PCol])"},
+    ]
+    by_table, report, _ = _calc_columns_part(dim, resolve, "Orders", known_tables={"Orders", "People"})
+    assert by_table.get("Orders", "").count("column Tag") == 1
+    assert by_table.get("People", "").count("column Tag") == 1
+    assert not any(r["status"] == "skipped-duplicate" for r in report)
+
+
 def test_token_keyed_sibling_reference_resolves():
     # Real Tableau auto-named calcs are referenced in sibling formulas by their internal
     # ``[Calculation_*]`` token, NOT their caption. The producer now registers its ``column_refs`` entry

@@ -53,6 +53,28 @@ def test_read_report_folder_captures_pbir_and_posix_keys(tmp_path):
     assert all("\\" not in k for k in parts)
 
 
+def test_read_report_folder_captures_binary_static_resource(tmp_path):
+    # A report that references a registered dashboard image must ship that image, or Fabric rejects
+    # the import with Workload_MissingFileFromDefinition. The binary is captured as raw bytes and
+    # base64-encodes faithfully into the InlineBase64 payload.
+    root = tmp_path / "DemoReport.Report"
+    _write_report_folder(root)
+    res_dir = root / "StaticResources" / "RegisteredResources"
+    res_dir.mkdir(parents=True)
+    png_bytes = b"\x89PNG\r\n\x1a\n\x00binary\xff\x00image"
+    (res_dir / "Logoabc123.png").write_bytes(png_bytes)
+
+    parts = D.read_report_folder(str(root))
+
+    key = "StaticResources/RegisteredResources/Logoabc123.png"
+    assert key in parts
+    assert parts[key] == png_bytes  # raw bytes, not decode-mangled text
+    part = next(p for p in D.fabric_definition_payload(parts)["definition"]["parts"]
+                if p["path"] == key)
+    assert part["payloadType"] == "InlineBase64"
+    assert base64.b64decode(part["payload"]) == png_bytes  # round-trips byte-for-byte
+
+
 def test_read_report_folder_empty_raises(tmp_path):
     (tmp_path / "Empty.Report").mkdir()
     with pytest.raises(FileNotFoundError):

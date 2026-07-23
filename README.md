@@ -14,6 +14,120 @@ and clearly flags the 20% that stays a human decision (complex LOD/table calcs,
 ambiguous relationships, storage-mode choice, native-source rebind). This folder
 proves that with a real offline run.
 
+## The journey at a glance
+
+Three stages take you from a Tableau file to a live Fabric report. **Stage 1 is the
+one you run today**; stages 2–3 are the same tool pointed at the cloud.
+
+| Stage | You run | You get | Needs |
+|---|---|---|---|
+| **1 · Convert** (offline) | `Convert-TableauToPowerBI.ps1 -Source <file>` | Typed TMDL model + calc→DAX + openable `.pbip` | Python 3.11 only — no internet, no Azure |
+| **2 · Open & finish** | Open the `.pbip` in Power BI Desktop | Visual QA + finish the flagged 20% (LODs, table calcs, storage mode) | Power BI Desktop |
+| **3 · Publish to Fabric** | `deploy_to_fabric.py --config fabric-deploy.json` | Model + report live in your Fabric workspace | `az login` + a Fabric workspace |
+
+> **Where DirectLake fits:** the target end-state is the semantic model bound in
+> **DirectLake mode over Delta tables in OneLake** — all-Fabric, no import copy. The
+> engine already emits DirectLake TMDL when you opt in; landing the data as Delta and
+> auto-binding the Lakehouse at deploy time is the active roadmap (see
+> [Publish into Fabric](#publish-into-fabric-stage-3) below). DirectLake is always
+> **opt-in** — the tool never silently picks it for you.
+
+## Clone-to-completion in 5 steps
+
+The whole arc, from a fresh `git clone` to an openable model + a shareable report.
+Each step links to the deeper section below.
+
+1. **Clone + check prerequisites.** You need **Python 3.11+** — nothing else for the
+   offline core (no `pip install`, no internet, no Azure). On **macOS/Linux** install
+   **PowerShell 7** to use the wrapper, or call `migrate_estate.py` directly.
+   ```powershell
+   git clone <repo-url>
+   cd tableau-accelerator
+   ```
+2. **Get your Tableau files out** ([Step 0](#step-0--get-your-tableau-files-out-and-staging-a-large-estate)).
+   Export the `.twb`/`.twbx` **blueprints** (not the data) from Tableau into a folder —
+   by hand for a few, or via REST API / `tabcmd` / Content Migration Tool for 150+.
+3. **Convert — offline** ([one command](#convert-a-tableau-report-to-a-power-bi-semantic-model-one-command)).
+   Point the tool at a file *or the whole folder*:
+   ```powershell
+   .\scripts\Convert-TableauToPowerBI.ps1 -Source C:\exports\all-workbooks -Output C:\out
+   ```
+   You get, per workbook: a typed **TMDL** model, safe calc→**DAX** (originals kept), an
+   openable **`.pbip`**, and — for the whole run — a self-contained
+   **`migration-report.html`** you can open or hand to the customer.
+   > First run with **zero setup**? Use the bundled sample:
+   > `.\scripts\Convert-TableauToPowerBI.ps1 -Source .\sample\Superstore.twb`
+   > (On a fresh Windows box, unblock scripts once per session:
+   > `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned`.)
+4. **Open & finish in Power BI Desktop.** Open the `.pbip`, do a visual QA pass, and
+   finish the flagged 20% the report calls out — LOD/table-calc stubs, storage-mode
+   choice, native-source rebind.
+5. **Publish to Fabric** ([Stage 3](#publish-into-fabric-stage-3), optional).
+   ```powershell
+   az login
+   # edit fabric-deploy.json -> set "workspace"
+   py -3.11 engine/skills/tableau-migration/scripts/deploy_to_fabric.py --config fabric-deploy.json
+   ```
+   Pushes each model + report into your workspace (add `--dry-run` to preview), then set
+   credentials in the Fabric portal and refresh. DirectLake-into-OneLake is the opt-in
+   roadmap end-state.
+
+> **The report is automatic.** Every convert run writes `migration-report.html` beside
+> `report.json` in the output folder — an estate-wide, offline, no-JavaScript view of
+> coverage, per-workbook sign-off, calc lineage, and the remaining manual follow-ups.
+> It's the shareable "what happened" artifact; a red definition-of-done gate stays red.
+
+## Step 0 — Get your Tableau files out (and staging a large estate)
+
+Before the tool runs, you need the Tableau **files** on disk. This is the "download the
+report" step, and it happens *inside Tableau* — it's the same whether you migrate 1
+workbook or 150.
+
+```mermaid
+flowchart LR
+    A[Tableau Server / Cloud<br/>or Desktop] -->|① EXPORT the file<br/>.twb / .twbx| B[A file on disk]
+    B -->|② our tool reads it| C[Power BI / Fabric<br/>.pbip + model]
+```
+
+**You're exporting blueprints, not data.** A `.twb`/`.twbx` is the workbook XML + its
+datasource definitions (and, for `.twbx`, a packaged `.hyper` extract). Even a large
+estate is usually **megabytes of files, not terabytes of rows** — the actual data stays
+in your warehouse and gets rebound at the destination (DirectLake / DirectQuery). So do
+**not** try to "download all the data locally to carry it over"; just pull the files.
+
+**One or a few workbooks** — export by hand:
+
+- **Tableau Desktop:** File → Export Packaged Workbook → `.twbx`.
+- **Tableau Server / Cloud:** open the workbook → Download → Tableau Workbook → `.twbx`.
+
+**A large estate (e.g. 150+ workbooks)** — bulk-export with a script, not by hand:
+
+| Method | What it is | Good for |
+|---|---|---|
+| **Tableau REST API** (`Download Workbook`) | Loop over every workbook, save each `.twbx` | 150+ workbooks, repeatable |
+| **`tabcmd get`** (CLI) | One command per workbook, easy to loop | Mid-size batches |
+| **Content Migration Tool** (Server Management) | Admin-run bulk content mover with a UI | Governed environments |
+
+Each of these produces a **folder full of `.twb`/`.twbx` files** — which is exactly what
+you point the tool at (`-Source C:\exports\all-workbooks`). It walks the whole folder in
+one deterministic batch.
+
+**Recommended pattern for a big estate:**
+
+1. **Bulk-export centrally, not on a laptop.** Run the REST API / `tabcmd` from a **server
+   or CI runner** (ideally **x64**, so packaged `.twbx` extracts don't warn-and-skip — see
+   [Will this run on my teammates' machines?](#will-this-run-on-my-teammates-machines)).
+   You get an inventory in the same pass.
+2. **Migrate in waves, not one big bang.** Batch by data source or business area:
+   convert → review the flagged worklist → publish. This keeps the human-review 20%
+   manageable and gives leadership visible progress.
+3. **Treat the local folder as throwaway staging.** Tableau Server stays the source of
+   truth until each wave is signed off. Re-export and re-run is free — the engine is
+   deterministic.
+4. **Don't drag the data along.** Bind to the live warehouse (or land as Delta for
+   DirectLake) at the destination. The optional `.hyper` reader is only for rare
+   offline-only workbooks.
+
 ## Convert a Tableau report to a Power BI semantic model (one command)
 
 This is the shareable tool. Point it at any Tableau file — get a Power BI/Fabric
@@ -77,7 +191,9 @@ skip; run just those on any x64 box or CI runner, or bind to the live warehouse 
 | `output/` | **The proof.** The actual generated bundle from a run: TMDL semantic model, calc→DAX measures, and an openable `.pbip`. |
 | `docs/customer-response.md` | Honest answers to the customer's 5 questions. |
 | `docs/architecture.md` | Reference architecture + the two migration motions + phased Revenue-Cycle-first plan. |
+| `docs/real-source-binding-runbook.md` | **Worked example against a real backend.** End-to-end native-source rebind on Azure SQL: provisioning, Entra-only auth, giving each datasource a resolvable descriptor, re-running to bind two workbooks — plus best-practice validation vs. real enterprise migrations. |
 | `docs/assessment-methodology.md` | How to size a 150-workbook estate and estimate effort. |
+| `docs/competitive-analysis.md` | How we compare to public migration guides / commercial accelerators, and the ranked ideas worth stealing. |
 | `engine/skills/tableau-migration/resources/viz-rebuild.md` | The visual layer: which Tableau chart types rebuild into which Power BI visuals, and what is deferred to a warning. |
 
 ## The offline proof (what actually ran)
@@ -93,6 +209,9 @@ The engine parsed a Superstore datasource + workbook **entirely offline** and pr
   - `Running Sales`: `RUNNING_SUM(SUM([Sales]))` → **left as an inert stub**, original
     formula preserved as a `TableauFormula` annotation (table calcs are a manual step).
 - **An openable `.pbip`** project (`output/pbip/Superstore/Superstore.pbip`).
+- **A self-contained `migration-report.html`** — an offline exec view of the run (coverage
+  KPIs, definition-of-done sign-off, calculation lineage, and the exact manual follow-ups),
+  rendered from `report.json` with no server, no JS, and no external assets.
 - **A definition-of-done gate that failed loud** on the workbook report binding because
   the engine **refuses to auto-pick** a storage mode (Import vs. DirectLake) — exactly the
   kind of honest, human-in-the-loop behavior you want when telling a customer what is and
@@ -122,6 +241,54 @@ interactive `.pbip` report, not a flat picture. Fidelity splits into two layers:
 Bottom line: it removes the mechanical rebuild (recreating dozens of charts from scratch and
 rebinding every field) and hands a designer a **live, openable report to refine** — not a blank
 canvas and not a static image.
+
+## Is the model ready for Copilot / Q&A?
+
+A correct model can still give **Copilot and Power BI Q&A weak answers** if its fields carry no
+descriptions, no synonyms, or expose inert placeholder measures. So the accelerator ships the model
+**Copilot-ready by default** — three additive, offline, deterministic touches:
+
+- **Honest field descriptions.** Every migrated measure gets a one-line description Copilot can
+  ground on. A translated measure records its provenance; an untranslated **stub is flagged
+  "needs manual review"** — never dressed up as done.
+- **Q&A synonyms.** Tableau field captions that differ from their model column names are harvested
+  into a Power BI **linguistic `cultureInfo`** layer, so a user asking for "revenue" maps to the
+  `Sales` field.
+- **A readiness scorecard.** `report.json` gains a `copilot_readiness` block and
+  `migration-report.html` shows a **Copilot / Q&A readiness** section — an overall verdict
+  (`ready` / `ready with warnings` / `not ready`) plus per-check coverage (measure translation,
+  synonyms, descriptions), so you can see what to fix before wiring up Copilot.
+
+These touches are **TMDL description comments and a separate culture part** — they never change a
+measure's DAX or a column's type, and the enriched model still passes the openability self-check.
+Prefer the leaner, description-free model? Pass `--no-copilot-ready`.
+
+**An honest limit — and what you must add.** The accelerator produces a Copilot-**ready scaffold**,
+not a Copilot-**grounded** model. It cannot invent business meaning that the Tableau source never
+carried — and Tableau workbooks rarely store field descriptions. The auto-generated measure
+descriptions record **provenance** ("migrated from a Tableau calc"), not what a field *means*.
+
+**You do not have to fix every table.** The scaffold is safe and openable exactly as migrated —
+nothing is broken if you enrich nothing. For Copilot quality you only touch the fields users actually
+ask about, which is typically a few dozen, not thousands. The `migration-report.html` scorecard ends
+with a **"Make this fully AI-ready"** checklist that scopes it:
+
+- **Enrich only what's visible** — the measures and slicer columns people query (revenue, margin,
+  region, product). Add a short plain-language **business description** to each. This is the single
+  biggest lever on answer quality.
+- **Hide, don't describe, the plumbing** — surrogate keys, ID columns, and technical/staging fields
+  need no description at all; just **hide** them so Copilot ignores them. That removes most of the
+  model from your to-do list.
+- **Curate Q&A synonyms** — add the words your users actually say (abbreviations, jargon, alternate
+  names) beyond the captions harvested automatically.
+- **Prep the kept fields** — friendly names, mark the date table, verify relationship cardinality and
+  cross-filter direction.
+- **Resolve the "needs manual review" stubs** before exposing them to Copilot — an inert stub returns
+  0, and Copilot will answer from it as if it were real.
+
+This is a **one-time curation done on the published semantic model** as normal stewardship — not a
+task you repeat on every migration, and re-running the accelerator won't undo it unless you overwrite
+the model file.
 
 ## How does it handle my calculations, LOD expressions, parameters & custom SQL?
 
@@ -216,6 +383,68 @@ py -3.11 -c "import sys; sys.path.insert(0, r'$fix'); import fixtures; fixtures.
 
 To run against a **real** workbook instead, drop any `.twb`/`.twbx` (or `.tds`/`.tdsx`)
 into `sample\` and re-run — the engine ingests packaged files directly.
+
+## Publish into Fabric (Stage 3)
+
+Once a bundle is converted and you've finished the flagged items, one stdlib-only
+script pushes it into a **Fabric workspace** over the Fabric REST API — no Power BI
+Desktop, no secrets in any file.
+
+**Step by step:**
+
+0. **Create the destination first (one-time, in the Fabric portal).** Before running the
+   script, a **Fabric workspace** must exist on a Fabric capacity — and for the **DirectLake**
+   target, a **Lakehouse** inside it too (that lakehouse's OneLake `Tables/` path is where the
+   data lands and what the model points at). The script publishes *into* these; it does **not**
+   create the workspace or lakehouse for you. (DirectQuery/Import need only the workspace.)
+1. **Sign in.** `az login` (the script uses your Azure CLI token by default — or pass
+   `--token` / set `FABRIC_TOKEN` to skip the CLI entirely).
+2. **Point it at your workspace.** Open [`fabric-deploy.json`](fabric-deploy.json) and set
+   `"workspace"` to your Fabric workspace **name or GUID**. List the bundles you want to
+   publish (or set `pbip_dir` to auto-discover every bundle in a folder).
+3. **Deploy.**
+
+   ```powershell
+   py -3.11 engine/skills/tableau-migration/scripts/deploy_to_fabric.py --config fabric-deploy.json
+   ```
+
+   This pushes each **semantic model** and its **report** (createOrUpdate with
+   long-running-operation polling), rebinds the report to its model, and — if
+   `"refresh": true` — triggers a refresh.
+4. **Preview first (optional).** Add `--dry-run` to see exactly what would be sent to
+   Fabric without calling it.
+
+**What it does and doesn't do today:**
+
+| Capability | Status |
+|---|---|
+| Push semantic model + report to a workspace (REST, LRO) | ✅ Ships today |
+| Rebind report → model, trigger refresh | ✅ Ships today |
+| Friendly failure if `az` isn't installed / not signed in | ✅ Guarded, no raw traceback |
+| Emit **DirectLake** TMDL (opt-in) | ✅ Emitter exists |
+| Create the Lakehouse, land data as **Delta in OneLake**, auto-bind DirectLake | 🚧 Roadmap (see below) |
+
+> **Credentials stay manual — by design.** The script binds items and refreshes, but it
+> **never enters datasource credentials**. Set the connection in the Fabric portal before
+> refreshing a DirectQuery/DirectLake model. A 401/403 on refresh means "go configure the
+> connection," not a bug.
+
+### The DirectLake-into-OneLake destination (roadmap)
+
+The end-state is the migrated model bound in **DirectLake mode over Delta tables in
+OneLake**. It lands in three opt-in phases, each preserving clone-and-run (stdlib + REST
++ az-token, no new `pip` deps):
+
+1. **Select + emit** *(offline, testable now)* — opt-in `--storage-mode directlake`
+   stamps DirectLake TMDL with a Lakehouse **placeholder** and emits a "land these tables
+   as Delta" worklist. No Azure calls.
+2. **Deploy rail** — `deploy_to_fabric.py` ensures/creates a Lakehouse, resolves its SQL
+   endpoint, substitutes the placeholder, and binds the model.
+3. **Data landing** — extract/flat-file → load Delta into the Lakehouse; live warehouse →
+   create a shortcut (no copy).
+
+DirectLake is always **opt-in**; storage mode remains a deliberate human decision, never
+auto-guessed.
 
 ## Provenance & honesty note
 
