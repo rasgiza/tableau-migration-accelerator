@@ -3217,9 +3217,12 @@ def _unquote_tmdl_name(name):
 # member's continuation lines (DAX body, ``dataType:``, annotations) are indented deeper.
 _TMDL_TOPLEVEL_MEMBER_RE = re.compile(r"^\t(column|hierarchy|partition)\b")
 _TMDL_CALC_COLUMN_HEADER_RE = re.compile(r"^\tcolumn\s+(?:'([^']+)'|([^\s=]+))\s*=")
-# A two-tab-indented ``key: value`` property line (dataType:, lineageTag:, summarizeBy:, ...). Used
-# to detect where a calc column's DAX expression ends and its properties begin.
-_TMDL_PROPERTY_LINE_RE = re.compile(r"^\t\t[A-Za-z_][\w.]*:")
+# A two-tab-indented property line: either ``key: value`` (dataType:, lineageTag:, summarizeBy:, ...)
+# or a valueless boolean flag on its own line (isHidden, isKey, isNameInferred, ...). Used to detect
+# where a calc column's DAX expression ends and its properties begin. A DAX continuation line is
+# always indented DEEPER than two tabs, so matching ``^\t\t<ident>`` (with a colon OR end-of-line)
+# never swallows expression text.
+_TMDL_PROPERTY_LINE_RE = re.compile(r"^\t\t[A-Za-z_][\w.]*(?::|\s*$)")
 # A retained *physical* column header (no ``=``) and its Delta ``sourceColumn`` -- used to map each
 # TMDL column name to the real Lakehouse column name when emitting materialization SQL.
 _TMDL_PHYSICAL_COLUMN_HEADER_RE = re.compile(r"^\tcolumn\s+(?:'([^']+)'|([^\s=]+))\s*$")
@@ -3342,6 +3345,97 @@ def _model_table_role_refs(model_tmdl):
     return tables, roles
 
 
+# Relationship property lines in ``relationships.tmdl`` (``fromColumn: Orders.Order_Date`` etc.).
+_TMDL_REL_FROM_RE = re.compile(r"^\s*fromColumn:\s*(.+)$")
+_TMDL_REL_TO_RE = re.compile(r"^\s*toColumn:\s*(.+)$")
+_TMDL_REL_ACTIVE_RE = re.compile(r"^\s*isActive:\s*(\w+)")
+
+
+def _split_tmdl_qualified(ref):
+    """``Orders.Order_Date`` / ``'My Table'.'My Col'`` -> ``(table, column)`` (quotes stripped)."""
+    s = ref.strip()
+    if s.startswith("'"):
+        end = s.find("'", 1)
+        if end == -1:
+            return None, None
+        table = s[1:end]
+        rest = s[end + 1:].lstrip()
+        col = rest[1:].strip() if rest.startswith(".") else rest.strip()
+    else:
+        dot = s.find(".")
+        if dot == -1:
+            return None, None
+        table, col = s[:dot].strip(), s[dot + 1:].strip()
+    if col.startswith("'") and col.endswith("'"):
+        col = col[1:-1]
+    return (table or None), (col or None)
+
+
+def _parse_relationships(parts):
+    """Parse ``relationships.tmdl`` into ``[{from_table, from_col, to_table, to_col, active}]``.
+
+    Feeds :func:`directlake_materialize.build_table_view`'s RELATED-inlining so a calc column pulling
+    from a related dimension can be materialised faithfully. Best-effort: a missing/malformed file
+    yields ``[]``, and only relationships whose endpoints both parse are returned.
+    """
+    text = parts.get("definition/relationships.tmdl")
+    if not isinstance(text, str):
+        return []
+    rels, cur = [], None
+    for line in text.split("\n"):
+        if line.startswith("relationship "):
+            if cur is not None:
+                rels.append(cur)
+            cur = {"active": True, "from_table": None, "from_col": None,
+                   "to_table": None, "to_col": None}
+            continue
+        if cur is None:
+            continue
+        m = _TMDL_REL_FROM_RE.match(line)
+        if m:
+            cur["from_table"], cur["from_col"] = _split_tmdl_qualified(m.group(1))
+            continue
+        m = _TMDL_REL_TO_RE.match(line)
+        if m:
+            cur["to_table"], cur["to_col"] = _split_tmdl_qualified(m.group(1))
+            continue
+        m = _TMDL_REL_ACTIVE_RE.match(line)
+        if m:
+            cur["active"] = m.group(1).strip().lower() != "false"
+    if cur is not None:
+        rels.append(cur)
+    return [r for r in rels if r["from_table"] and r["from_col"] and r["to_table"] and r["to_col"]]
+
+
+def _all_calc_column_defs(parts):
+    """Map ``(table_display_name, column_name) -> DAX`` for every calculated column in the model.
+
+    Includes calculated *tables* (e.g. the synthesized Date calendar), whose columns are the RELATED
+    targets a materialised source column must inline. Keyed by display name so it aligns with the
+    relationship endpoints and the RELATED table qualifier.
+    """
+    defs = {}
+    for path, text in parts.items():
+        if not (path.startswith("definition/tables/") and path.endswith(".tmdl")):
+            continue
+        if not isinstance(text, str):
+            continue
+        first_nl = text.find("\n")
+        if first_nl == -1:
+            continue
+        table_line = text[:first_nl]
+        if not table_line.startswith("table "):
+            continue
+        disp = _unquote_tmdl_name(table_line[len("table "):])
+        marker = text.find("\n\tpartition ")
+        body = text[first_nl:marker] if marker != -1 else text[first_nl:]
+        _, cols = _strip_calc_columns_from_body(body)
+        for c in cols:
+            if c.get("name") and c.get("dax"):
+                defs[(disp, c["name"])] = c["dax"]
+    return defs
+
+
 def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlake_url,
                                             delta_name_of=None, schema_name="dbo"):
     """Rebind an ``assemble_import_model`` parts dict onto a DirectLake-over-OneLake seam.
@@ -3383,6 +3477,10 @@ def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlak
     new_parts = dict(parts)
     landed = []
     stripped = []
+    # Relationship + calc-column context for faithful RELATED() inlining when materialising a source
+    # column that pulls from a related dimension (e.g. Year = RELATED('Date'[Year])). Computed once.
+    _relationships = _parse_relationships(parts)
+    _coldefs_all = _all_calc_column_defs(parts)
     for path, text in parts.items():
         if not (path.startswith("definition/tables/") and path.endswith(".tmdl")):
             continue
@@ -3408,8 +3506,13 @@ def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlak
             # materialization SQL (DAX -> Spark SQL) so Direct Lake can read them as physical columns.
             mat_names = {r["name"] for r in rem["buckets"].get(MATERIALIZE_UPSTREAM, [])}
             mat_cols = [c for c in stripped_cols if c.get("name") in mat_names]
+            related_ctx = {
+                "source_table": disp,
+                "rels": [r for r in _relationships if r.get("from_table") == disp],
+                "coldefs": _coldefs_all,
+            }
             materialization = build_table_view(
-                disp, mat_cols, _physical_column_map(body), schema=schema)
+                disp, mat_cols, _physical_column_map(body), schema=schema, related=related_ctx)
             stripped.append({
                 "table": disp,
                 "columns": [c["name"] for c in stripped_cols],
