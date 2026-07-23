@@ -119,46 +119,59 @@ def _render_dod_banner(report: Dict[str, Any]) -> str:
     ) % (cls, _esc(status), _esc(bound), _esc(total), _esc(warned), _esc(failed), verdict)
 
 
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _render_kpis(report: Dict[str, Any]) -> str:
     s = report.get("summary") or {}
-    cards = [
-        _kpi_card(
+    cards = []
+    # The datasource-rollup cards describe standalone/published datasources. An
+    # embedded-datasource (workbook-only) run leaves these universes empty, and a
+    # "0 / 0" card reads as a false failure -- suppress each card whose universe is
+    # empty, but keep it whenever there is a real denominator to report against.
+    if _as_int(s.get("datasources_total")) > 0:
+        cards.append(_kpi_card(
             "Datasources migrated",
             "%s / %s" % (s.get("datasources_migrated", 0), s.get("datasources_total", 0)),
-            "%s partial &middot; %s fallback"
+            "%s partial \u00b7 %s fallback"
             % (s.get("datasources_partial", 0), s.get("datasources_fallback", 0)),
-        ),
-        _kpi_card(
+        ))
+    if _as_int(s.get("measures_total")) > 0:
+        cards.append(_kpi_card(
             "Model measures translated",
             "%s / %s" % (s.get("measures_translated", 0), s.get("measures_total", 0)),
             "%s stubbed" % s.get("measures_stubbed", 0),
-        ),
-        _kpi_card(
+        ))
+    if _as_int(s.get("calc_columns_total")) > 0:
+        cards.append(_kpi_card(
             "Model calc columns",
             "%s / %s" % (s.get("calc_columns_translated", 0), s.get("calc_columns_total", 0)),
             "%s stubbed" % s.get("calc_columns_stubbed", 0),
+        ))
+    cards.append(_kpi_card(
+        "Workbook calcs translated",
+        _pct(s.get("workbook_calcs_translated"), s.get("workbook_calcs_total")),
+        "%s of %s \u00b7 %s need review"
+        % (
+            s.get("workbook_calcs_translated", 0),
+            s.get("workbook_calcs_total", 0),
+            s.get("workbook_calcs_needs_review", 0),
         ),
-        _kpi_card(
-            "Workbook calcs translated",
-            _pct(s.get("workbook_calcs_translated"), s.get("workbook_calcs_total")),
-            "%s of %s &middot; %s need review"
-            % (
-                s.get("workbook_calcs_translated", 0),
-                s.get("workbook_calcs_total", 0),
-                s.get("workbook_calcs_needs_review", 0),
-            ),
-        ),
-        _kpi_card(
-            "Visuals rebuilt",
-            str(s.get("visuals_rebuilt", 0)),
-            "%s with warnings" % s.get("visuals_warned", 0),
-        ),
-        _kpi_card(
-            "Workbooks viz built",
-            "%s / %s" % (s.get("workbooks_viz_built", 0), s.get("workbooks_total", 0)),
-            "%s errored" % s.get("workbooks_viz_error", 0),
-        ),
-    ]
+    ))
+    cards.append(_kpi_card(
+        "Visuals rebuilt",
+        str(s.get("visuals_rebuilt", 0)),
+        "%s with warnings" % s.get("visuals_warned", 0),
+    ))
+    cards.append(_kpi_card(
+        "Workbooks viz built",
+        "%s / %s" % (s.get("workbooks_viz_built", 0), s.get("workbooks_total", 0)),
+        "%s errored" % s.get("workbooks_viz_error", 0),
+    ))
     return '<section><h2>Coverage</h2><div class="kpis">%s</div></section>' % "".join(cards)
 
 
@@ -413,6 +426,224 @@ def _render_followups_rollup(report: Dict[str, Any]) -> str:
     ) % items
 
 
+# DirectLake remediation buckets (see directlake_remediation.py) -> customer-facing label + the
+# concrete action. Ordered best-outcome-first so the plan reads as a priority list.
+_REMEDIATION_LABELS = (
+    ("materialize_upstream", "Materialize upstream",
+     "Compute once in the Lakehouse (SQL view / computed Delta column) so DirectLake reads it "
+     "natively as a physical column \u2014 the best-practice, fully-recovered outcome."),
+    ("field_parameter", "Field / what-if parameter",
+     "Model as a field parameter or what-if parameter (both supported on DirectLake); it was a "
+     "Tableau parameter, not a data column."),
+    ("measure_worklist", "Author as a DAX measure",
+     "This is an aggregation / table calc \u2014 a measure, not a physical column. Add it to the "
+     "DAX measure worklist."),
+    ("review", "Manual review",
+     "No faithful deterministic form (DAX-language gap or unresolved reference). Review and decide "
+     "by hand; the honest stub stays until then."),
+)
+
+
+def _render_remediation_plan(stripped: List[Dict[str, Any]]) -> str:
+    """Render the aggregated DirectLake remediation plan for the stripped calc columns.
+
+    ``stripped`` is the seam's ``stripped_calc_columns`` list; each entry may carry a
+    ``remediation`` block (``{"buckets", "counts"}`` from
+    :func:`directlake_remediation.classify_stripped_columns`). Columns are aggregated across tables
+    and grouped by bucket, best-outcome-first, so the customer sees exactly what to do with each
+    dropped column. Returns ``""`` when no entry carries a remediation block (older manifests).
+    """
+    grouped: Dict[str, List[str]] = {}
+    for e in stripped:
+        rem = e.get("remediation") or {}
+        for bucket, rows in (rem.get("buckets") or {}).items():
+            grouped.setdefault(bucket, []).extend(r.get("name") for r in rows if r.get("name"))
+    if not any(grouped.values()):
+        return ""
+    rows_html = ""
+    for bucket, label, action in _REMEDIATION_LABELS:
+        names = grouped.get(bucket) or []
+        if not names:
+            continue
+        rows_html += (
+            '<tr><td>%s</td><td>%s</td><td>%s</td><td class="reason">%s</td></tr>'
+            % (_esc(label), _esc(len(names)), _esc(action), _esc(", ".join(names)))
+        )
+    return (
+        '<div class="dl-sub">Remediation plan '
+        '<span class="muted">&mdash; what to do with each removed column to reach pure DirectLake'
+        '</span></div>'
+        '<table class="grid"><thead><tr>'
+        '<th>Remediation</th><th>#</th><th>Action</th><th>Columns</th>'
+        '</tr></thead><tbody>%s</tbody></table>'
+    ) % rows_html
+
+
+def _render_materialization(stripped: List[Dict[str, Any]]) -> str:
+    """Render the generated upstream materialization SQL for the ``materialize_upstream`` columns.
+
+    Each ``stripped`` entry may carry a ``materialization`` block (from
+    :func:`directlake_materialize.build_table_view`): ``{"table", "sql", "covered", "needs_manual",
+    "columns"}``. The SQL is shown verbatim (HTML-escaped) in a copy-friendly block so the customer
+    can run it in a Fabric Lakehouse notebook to add the row-level columns as physical Delta columns,
+    then rebind Direct Lake to the enriched table. Returns ``""`` when nothing was materializable.
+    """
+    blocks = []
+    for e in stripped:
+        mat = e.get("materialization") or {}
+        if not (mat.get("columns") or []):
+            continue
+        sql = (mat.get("sql") or "").strip()
+        if not sql:
+            continue
+        blocks.append(
+            '<div class="muted" style="margin-top:8px">%s &mdash; %s materialized, %s need manual SQL</div>'
+            % (_esc(mat.get("table")), _esc(mat.get("covered", 0)), _esc(mat.get("needs_manual", 0)))
+            + '<pre class="dl-sql">%s</pre>' % _esc(sql)
+        )
+    if not blocks:
+        return ""
+    return (
+        '<div class="dl-sub">Generated materialization SQL '
+        '<span class="muted">&mdash; run in a Fabric Lakehouse notebook (Spark SQL) to add the '
+        'row-level columns as physical Delta columns, then rebind Direct Lake to the enriched table'
+        '</span></div>' + "".join(blocks)
+    )
+
+
+def _render_directlake(report: Dict[str, Any]) -> str:
+    """DirectLake-over-OneLake deployment lineage: the Delta landing manifest plus the exact
+    engine adjustments a DirectLake binding required.
+
+    Rendered only when at least one datasource carries a ``directlake_seam`` block (the extract-
+    backed seam rebound its base tables onto DirectLake). It documents, per datasource: the shared
+    ``AzureStorage.DataLake`` expression + OneLake URL the model binds to (flagged when still a
+    placeholder), the schema, the **landing manifest** (which model table maps to which Delta table
+    a human must mirror / shortcut into the Lakehouse), any **calculated columns stripped** from a
+    DirectLake table (unsupported there -- convert to measures or materialise upstream), and any
+    ``CALENDARAUTO()`` **rewritten** to a bounded ``CALENDAR()`` (that function implicitly scans
+    DirectLake dates, which the engine rejects). This is the DirectLake half of the migration
+    lineage -- honest about what landed automatically and what a customer must finish.
+    All values are HTML-escaped; the section is self-contained and needs no JS.
+    """
+    seams: List[tuple] = []
+    for ds in report.get("datasources") or []:
+        seam = ds.get("directlake_seam")
+        if seam:
+            seams.append((ds.get("name") or "(unnamed datasource)", seam))
+    # A consolidated workbook builds its model in the workbook path, so its seam audit lives on the
+    # workbook entry (the datasource rollup is empty for it). Read both so no run is missed.
+    for wb in report.get("workbooks") or []:
+        seam = wb.get("directlake_seam")
+        if seam:
+            seams.append((wb.get("name") or "(unnamed workbook)", seam))
+    if not seams:
+        return ""
+
+    blocks: List[str] = []
+    for name, seam in seams:
+        url = seam.get("directlake_url") or ""
+        is_placeholder = bool(seam.get("url_is_placeholder"))
+        schema = seam.get("schema")
+        url_badge = (
+            ' <span class="badge warn">placeholder &mdash; set --directlake-url</span>'
+            if is_placeholder else ' <span class="badge ok">bound</span>'
+        )
+        meta = (
+            '<div class="dl-meta">'
+            'Expression <code>%s</code>%s<br>'
+            'OneLake source <code>%s</code><br>'
+            'Schema <code>%s</code>'
+            '</div>'
+        ) % (
+            _esc(seam.get("expression") or "DirectLake"),
+            url_badge,
+            _esc(url),
+            _esc(schema if schema else "(none \u2014 classic lakehouse)"),
+        )
+
+        # Landing manifest -- the Delta tables to mirror / shortcut into the Lakehouse.
+        landing = seam.get("needs_landing") or []
+        if landing:
+            lrows = "".join(
+                "<tr><td>%s</td><td><code>%s</code></td></tr>"
+                % (_esc(e.get("table")), _esc(e.get("delta_name")))
+                for e in landing
+            )
+            landing_html = (
+                '<div class="dl-sub">Delta landing manifest '
+                '<span class="muted">&mdash; mirror / shortcut these into the Lakehouse</span></div>'
+                '<table class="grid"><thead><tr>'
+                '<th>Model table</th><th>Delta table (OneLake)</th>'
+                '</tr></thead><tbody>%s</tbody></table>'
+            ) % lrows
+        else:
+            landing_html = ""
+
+        # Calc columns stripped from DirectLake tables (unsupported there), now with a per-column
+        # REMEDIATION plan (materialize upstream / field parameter / measure worklist / review) so
+        # the section tells the customer what to DO with each, not just that it was removed.
+        stripped = seam.get("stripped_calc_columns") or []
+        if stripped:
+            srows = "".join(
+                "<tr><td>%s</td><td>%s</td><td class=\"reason\">%s</td></tr>"
+                % (
+                    _esc(e.get("table")),
+                    _esc(len(e.get("columns") or [])),
+                    _esc(", ".join(e.get("columns") or [])),
+                )
+                for e in stripped
+            )
+            stripped_html = (
+                '<div class="dl-sub">Calculated columns removed '
+                '<span class="muted">&mdash; DirectLake tables cannot carry them; each is routed to '
+                'a remediation below</span></div>'
+                '<table class="grid"><thead><tr>'
+                '<th>Table</th><th>#</th><th>Columns</th>'
+                '</tr></thead><tbody>%s</tbody></table>'
+            ) % srows
+            stripped_html += _render_remediation_plan(stripped)
+            stripped_html += _render_materialization(stripped)
+        else:
+            stripped_html = ""
+
+        # CALENDARAUTO() -> bounded CALENDAR() rewrites.
+        cal = seam.get("calendar_adjustments") or []
+        if cal:
+            crows = "".join(
+                "<tr><td>%s</td><td><code>%s</code></td><td><code>%s</code></td></tr>"
+                % (_esc(e.get("table")), _esc(e.get("from")), _esc(e.get("to")))
+                for e in cal
+            )
+            cal_html = (
+                '<div class="dl-sub">Calendar rewritten for DirectLake '
+                '<span class="muted">&mdash; CALENDARAUTO() implicitly scans DirectLake dates; '
+                'rewritten to a bounded CALENDAR()</span></div>'
+                '<table class="grid"><thead><tr>'
+                '<th>Calculated table</th><th>From</th><th>To</th>'
+                '</tr></thead><tbody>%s</tbody></table>'
+            ) % crows
+        else:
+            cal_html = ""
+
+        blocks.append(
+            '<div class="ds"><div class="ds-head">'
+            '<span class="ds-name">%s</span> '
+            '<span class="badge ok">DirectLake &middot; OneLake</span></div>'
+            '%s%s%s%s</div>'
+            % (_esc(name), meta, landing_html, stripped_html, cal_html)
+        )
+
+    return (
+        '<section><h2>DirectLake &mdash; OneLake deployment lineage</h2>'
+        '<p class="muted">How the model binds to live OneLake Delta, and exactly what a human must '
+        'finish. The base tables are rebound onto a DirectLake&nbsp;&rarr;&nbsp;OneLake source; the '
+        'landing manifest names the Delta tables to mirror or shortcut into the Lakehouse. Any '
+        'calculated columns stripped, or a calendar rewritten, are listed so nothing changes '
+        'silently.</p>%s</section>'
+    ) % "".join(blocks)
+
+
 _CSS = """
 :root{--fg:#1b1b1f;--muted:#6b6b75;--line:#e3e3e8;--bg:#fff;--card:#f7f7f9;
 --ok:#1a7f37;--ok-bg:#eaf6ec;--warn:#9a6700;--warn-bg:#fdf6e3;--bad:#b32424;--bad-bg:#fbeaea;--accent:#0b5cad;}
@@ -463,14 +694,14 @@ ul.rollup li,.followups li{margin:2px 0}
 details.cat{border:1px solid var(--line);border-radius:6px;margin:8px 0;background:var(--card)}
 details.cat>summary{cursor:pointer;padding:8px 12px;font-weight:600;font-size:13px;list-style:none}
 details.cat>summary::-webkit-details-marker{display:none}
-details.cat>summary::before{content:"\25B8";display:inline-block;margin-right:8px;color:var(--muted)}
-details.cat[open]>summary::before{content:"\25BE"}
+details.cat>summary::before{content:"\\25B8";display:inline-block;margin-right:8px;color:var(--muted)}
+details.cat[open]>summary::before{content:"\\25BE"}
 details.cat[open]>summary{border-bottom:1px solid var(--line)}
 .cat-count{color:var(--muted);font-weight:400}
 .cat-guidance{color:var(--muted);font-size:12px;line-height:1.5;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--bg)}
 details.cat table.grid{font-size:12px}
-details.cat table.grid th{background:var(--bg)}
-footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+details.cat table.grid th{background:var(--bg)}.dl-meta{color:var(--muted);font-size:12px;line-height:1.7;margin:2px 0 10px}
+.dl-sub{font-weight:600;font-size:12px;margin:14px 0 6px}footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
 """
 
 
@@ -486,20 +717,34 @@ def _render_copilot_readiness(report: Dict[str, Any]) -> str:
     if not checks:
         return ""
     overall = str(card.get("overall") or "")
-    banner_cls = {"ready": "ok", "ready_with_warnings": "warn", "not_ready": "bad"}.get(
-        overall, "muted")
-    verdict = {
-        "ready": "This model is grounded for Power BI Q&amp;A / Copilot.",
-        "ready_with_warnings": "Usable for Copilot, with items to review below.",
-        "not_ready": "Not yet grounded for Copilot &mdash; address the failed checks below.",
-    }.get(overall, "")
+    # Embedded-datasource runs have nothing datasource-scoped to grade: every check is "na".
+    # Reporting "ready" then would be misleading (nothing was actually evaluated), so we render
+    # an honest "not evaluated" verdict instead of a green pass.
+    all_na = bool(checks) and not any(
+        str(c.get("status") or "").lower() != "na" for c in checks)
+    if all_na:
+        banner_cls = "muted"
+        overall_label = "not evaluated"
+        verdict = (
+            "No standalone datasources were in scope for this run, so there was nothing "
+            "to ground for Copilot / Q&amp;A."
+        )
+    else:
+        banner_cls = {"ready": "ok", "ready_with_warnings": "warn", "not_ready": "bad"}.get(
+            overall, "muted")
+        overall_label = overall.replace("_", " ") or "unknown"
+        verdict = {
+            "ready": "This model is grounded for Power BI Q&amp;A / Copilot.",
+            "ready_with_warnings": "Usable for Copilot, with items to review below.",
+            "not_ready": "Not yet grounded for Copilot &mdash; address the failed checks below.",
+        }.get(overall, "")
     totals = card.get("totals") or {}
     banner = (
         '<div class="banner-title">Copilot readiness: <strong>%s</strong></div>'
         '<div class="banner-body">%s passed &nbsp;&middot;&nbsp; %s warned '
         '&nbsp;&middot;&nbsp; %s failed. %s</div>'
     ) % (
-        _esc(overall.replace("_", " ") or "unknown"),
+        _esc(overall_label),
         _esc(totals.get("passed", 0)),
         _esc(totals.get("warned", 0)),
         _esc(totals.get("failed", 0)),
@@ -563,6 +808,7 @@ def render_report_html(report: Dict[str, Any]) -> str:
         _render_copilot_readiness(report),
         _render_signoff_table(report),
         _render_needs_review(report),
+        _render_directlake(report),
         _render_lineage(report),
         _render_followups_rollup(report),
         '<footer>Generated offline by the Tableau &rarr; Power BI / Fabric accelerator from '
