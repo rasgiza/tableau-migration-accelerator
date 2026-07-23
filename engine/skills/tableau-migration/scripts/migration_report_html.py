@@ -508,6 +508,8 @@ def _render_materialization(stripped: List[Dict[str, Any]]) -> str:
         '<span class="muted">&mdash; run in a Fabric Lakehouse notebook (Spark SQL) to add the '
         'row-level columns as physical Delta columns, then rebind Direct Lake to the enriched table'
         '</span></div>' + "".join(blocks)
+        + '<div class="muted" style="margin-top:8px">Saved as a runnable script '
+          '<code>directlake-materialization.sql</code> in the .pbip bundle.</div>'
     )
 
 
