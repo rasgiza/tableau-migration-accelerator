@@ -159,7 +159,7 @@ class _Parser:
         if k == "STRING":
             return ("str", v[1:-1].replace('""', '"'))
         if k == "COLREF":
-            return ("col", _colname(v))
+            return ("col", _colname(v), _coltable(v))
         if k == "OP" and v == "(":
             node = self._or()
             self._expect_op(")")
@@ -184,6 +184,16 @@ class _Parser:
 def _colname(colref):
     """``'Orders'[Order_Date]`` / ``[Order_Date]`` -> the column name ``Order_Date``."""
     return colref[colref.rindex("[") + 1: colref.rindex("]")].strip()
+
+
+def _coltable(colref):
+    """``'Orders'[Order_Date]`` / ``Orders[Order_Date]`` -> the table ``Orders`` (``None`` for ``[Col]``)."""
+    pre = colref[:colref.rindex("[")].strip()
+    if not pre:
+        return None
+    if pre.startswith("'") and pre.endswith("'"):
+        pre = pre[1:-1]
+    return pre or None
 
 
 # --------------------------------------------------------------------------- emitter (AST -> Spark SQL)
@@ -278,13 +288,113 @@ def _emit_func(name, args, colmap):
     raise TranslateError(f"unsupported function {name}()")
 
 
-def dax_to_sql(dax, *, column_map=None):
+# --------------------------------------------------------------------------- RELATED inlining
+# A calculated column may pull a value from a related table via ``RELATED('Dim'[Col])``. Direct Lake
+# cannot carry the calc column, and the dimension is often a *calculated* table (e.g. the synthesized
+# Date calendar) with NO Delta table to join to -- so a SQL JOIN is not an option. Instead we INLINE:
+# resolve ``RELATED('Dim'[Col])`` to ``Dim[Col]``'s own row-level definition, then substitute the
+# related KEY column with the source table's foreign-key column. ``RELATED('Date'[Year])`` where
+# ``Date[Year] = YEAR('Date'[Date])`` and the active relationship is ``Orders[Order_Date] ->
+# Date[Date]`` becomes ``YEAR(Orders[Order_Date])`` -> ``YEAR(`Order Date`)``. This is provably
+# equal to the DAX and needs no join. It stays correct-or-abstain: it inlines ONLY when there is
+# exactly one active relationship to the dimension AND the dimension column's definition references
+# nothing but that dimension's key column; anything else raises and degrades to a REVIEW TODO.
+def _resolve_related(node, related, depth=0):
+    """Return a copy of ``node`` with every ``RELATED('Dim'[Col])`` replaced by its inlined,
+    key-substituted definition. Raises :class:`TranslateError` when a RELATED cannot be inlined."""
+    if not isinstance(node, tuple):
+        return node
+    tag = node[0]
+    if tag == "func" and node[1] == "RELATED":
+        return _inline_related(node[2], related, depth)
+    if tag in ("num", "str", "bool", "null", "col"):
+        return node
+    if tag == "neg":
+        return ("neg", _resolve_related(node[1], related, depth))
+    if tag == "bin":
+        return ("bin", node[1],
+                _resolve_related(node[2], related, depth),
+                _resolve_related(node[3], related, depth))
+    if tag == "in":
+        return ("in", _resolve_related(node[1], related, depth),
+                [_resolve_related(a, related, depth) for a in node[2]])
+    if tag == "func":
+        return ("func", node[1], [_resolve_related(a, related, depth) for a in node[2]])
+    return node
+
+
+def _inline_related(args, related, depth):
+    if depth > 8:
+        raise TranslateError("RELATED() nested too deeply to inline")
+    if not related:
+        raise TranslateError("unsupported function RELATED() (no relationship context)")
+    if len(args) != 1 or args[0][0] != "col":
+        raise TranslateError("RELATED() expects a single column reference")
+    _, cname, ctable = args[0]
+    if not ctable:
+        raise TranslateError("RELATED() column is unqualified; cannot resolve its table")
+    source = related.get("source_table")
+    rels = [r for r in (related.get("rels") or [])
+            if r.get("to_table") == ctable and r.get("active", True)]
+    if len(rels) != 1:
+        raise TranslateError(
+            f"RELATED('{ctable}'[{cname}]) needs exactly one active relationship to "
+            f"'{ctable}' (found {len(rels)})")
+    fk = rels[0].get("from_col")
+    key = rels[0].get("to_col")
+    coldef = (related.get("coldefs") or {}).get((ctable, cname))
+    if not coldef:
+        raise TranslateError(
+            f"RELATED('{ctable}'[{cname}]): '{cname}' is a physical column in '{ctable}' "
+            f"(would require a join, not inlinable)")
+    sub = _Parser(_tokenize(coldef)).parse()
+    sub = _substitute_related_key(sub, ctable, key, source, fk)
+    return _resolve_related(sub, related, depth + 1)
+
+
+def _substitute_related_key(node, ctable, key, source, fk):
+    """Replace references to the related table's KEY column with the source table's FK column, and
+    reject any reference to a *non-key* column of the related table (not inlinable without a join)."""
+    if not isinstance(node, tuple):
+        return node
+    tag = node[0]
+    if tag == "col":
+        name, table = node[1], node[2]
+        # A reference inside the dimension's own definition is either qualified with the dimension
+        # (``'Date'[Date]``) or unqualified (``[Date]``); both mean a column of that dimension.
+        if table in (ctable, None):
+            if name == key:
+                return ("col", fk, source)
+            raise TranslateError(
+                f"RELATED inline references non-key column '{name}' of '{ctable}'")
+        return node
+    if tag in ("num", "str", "bool", "null"):
+        return node
+    if tag == "neg":
+        return ("neg", _substitute_related_key(node[1], ctable, key, source, fk))
+    if tag == "bin":
+        return ("bin", node[1],
+                _substitute_related_key(node[2], ctable, key, source, fk),
+                _substitute_related_key(node[3], ctable, key, source, fk))
+    if tag == "in":
+        return ("in", _substitute_related_key(node[1], ctable, key, source, fk),
+                [_substitute_related_key(a, ctable, key, source, fk) for a in node[2]])
+    if tag == "func":
+        return ("func", node[1],
+                [_substitute_related_key(a, ctable, key, source, fk) for a in node[2]])
+    return node
+
+
+def dax_to_sql(dax, *, column_map=None, related=None):
     """Translate a row-level DAX scalar expression to a Spark SQL scalar expression.
 
     ``dax``        -- the calc column's translated DAX (text after ``=`` in the TMDL).
     ``column_map`` -- optional ``{dax_column_name: physical_delta_column}`` mapping so the emitted
                       SQL references the real Lakehouse column names (e.g. ``Order_Date`` ->
                       ``Order Date``). Missing names fall back to the DAX name verbatim.
+    ``related``    -- optional relationship/column context that enables faithful inlining of
+                      ``RELATED('Dim'[Col])`` (see :func:`_resolve_related`). Without it, RELATED is
+                      rejected (``ok=False``) rather than guessed.
 
     Returns ``{"ok": bool, "sql": str|None, "reason": str}``. Never raises: an untranslatable
     expression yields ``ok=False`` with a human-readable ``reason`` (so the caller emits an explicit
@@ -298,6 +408,8 @@ def dax_to_sql(dax, *, column_map=None):
         if not toks:
             return {"ok": False, "sql": None, "reason": "empty expression"}
         ast = _Parser(toks).parse()
+        if related:
+            ast = _resolve_related(ast, related)
         return {"ok": True, "sql": _emit(ast, column_map or {}), "reason": ""}
     except TranslateError as exc:
         return {"ok": False, "sql": None, "reason": str(exc)}
@@ -306,13 +418,17 @@ def dax_to_sql(dax, *, column_map=None):
 
 
 # --------------------------------------------------------------------------- materialization script
-def build_table_view(table, columns, column_map=None, *, schema="dbo", suffix="_enriched"):
+def build_table_view(table, columns, column_map=None, *, schema="dbo", suffix="_enriched",
+                     related=None):
     """Assemble the upstream materialization for ONE table's ``materialize_upstream`` columns.
 
     ``table``      -- the display/table name (also the Delta table name).
     ``columns``    -- ``[{"name", "dax"}]`` for the columns routed to materialize-upstream.
     ``column_map`` -- optional ``{dax_name: physical}`` passed through to :func:`dax_to_sql`.
     ``schema`` / ``suffix`` -- the enriched table is ``schema.<table><suffix>``.
+    ``related``    -- optional ``{"source_table", "rels", "coldefs"}`` context enabling faithful
+                      inlining of ``RELATED('Dim'[Col])`` to a source-column expression (see
+                      :func:`_resolve_related`); omit it and RELATED degrades to a REVIEW TODO.
 
     Returns ``{"table", "view", "sql", "columns", "covered", "needs_manual"}``. ``sql`` is a Spark SQL
     ``CREATE OR REPLACE TABLE ... AS SELECT *`` that adds every faithfully-translatable column as a
@@ -324,7 +440,7 @@ def build_table_view(table, columns, column_map=None, *, schema="dbo", suffix="_
     rows, select_exprs, todos = [], [], []
     for col in columns or []:
         name, dax = col.get("name"), col.get("dax")
-        res = dax_to_sql(dax, column_map=column_map)
+        res = dax_to_sql(dax, column_map=column_map, related=related)
         rows.append({"name": name, "sql": res["sql"], "ok": res["ok"], "reason": res["reason"]})
         if res["ok"]:
             select_exprs.append(f"    {res['sql']} AS `{name}`")

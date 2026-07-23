@@ -274,6 +274,66 @@ def test_converter_strips_calc_columns_from_directlake_table():
     assert "partition Orders = entity" in orders and "mode: directLake" in orders
 
 
+def test_converter_inlines_related_date_parts_into_materialization():
+    # A source calc column that pulls a date part from the related Date dimension must be
+    # materialized by INLINING the dimension's own definition with the FK substituted -- NOT by a
+    # join (the Date table is calculated, with no Delta table to join to). The 'Month No' def
+    # carries a valueless `isHidden` property, which must not be swallowed into the captured DAX.
+    orders = (
+        "table Orders\n"
+        "\tcolumn Order_Date\n"
+        "\t\tdataType: dateTime\n"
+        "\t\tsourceColumn: \"Order Date\"\n\n"
+        "\tcolumn Year = RELATED('Date'[Year])\n"
+        "\t\tdataType: int64\n\n"
+        "\tcolumn Month = RELATED('Date'[Month No])\n"
+        "\t\tdataType: int64\n\n"
+        "\tpartition Orders = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource =\n"
+        "\t\t\tlet Source = #table(type table [], {}) in Source\n\n"
+    )
+    date = (
+        "table Date\n"
+        "\tcolumn Date\n"
+        "\t\tdataType: dateTime\n"
+        "\t\tisKey\n"
+        "\t\tsourceColumn: [Date]\n\n"
+        "\tcolumn Year = YEAR('Date'[Date])\n"
+        "\t\tformatString: 0\n\n"
+        "\tcolumn 'Month No' = MONTH('Date'[Date])\n"
+        "\t\tisHidden\n"
+        "\t\tformatString: 0\n\n"
+        "\tpartition Date = calculated\n"
+        "\t\tmode: import\n"
+        "\t\tsource = CALENDAR(DATE(2010,1,1), DATE(2035,12,31))\n\n"
+    )
+    rels = (
+        "relationship abc\n"
+        "\tfromColumn: Orders.Order_Date\n"
+        "\ttoColumn: Date.Date\n\n"
+        "relationship def\n"
+        "\tisActive: false\n"
+        "\tfromColumn: Orders.Ship_Date\n"
+        "\ttoColumn: Date.Date\n"
+    )
+    parts = {
+        "definition/tables/Orders.tmdl": orders,
+        "definition/tables/Date.tmdl": date,
+        "definition/relationships.tmdl": rels,
+        "definition/model.tmdl": "model Model\nref table Orders\nref table Date\n",
+        "definition/expressions.tmdl": "expression X = 1\n",
+    }
+    _, landed, stripped, _ = convert_import_parts_to_directlake_seam(
+        parts, expression_name="DL", directlake_url="https://onelake/Tables", schema_name="dbo")
+    assert landed == [{"table": "Orders", "delta_name": "Orders"}]
+    mat = stripped[0]["materialization"]
+    # Both date parts are faithfully inlined against the source FK -- no join, fully covered.
+    assert mat["covered"] == 2 and mat["needs_manual"] == 0
+    assert "YEAR(`Order Date`) AS `Year`" in mat["sql"]
+    assert "MONTH(`Order Date`) AS `Month`" in mat["sql"]
+
+
 def test_converter_no_m_partition_is_noop():
     parts = {
         "definition/tables/_Measures.tmdl": "table _Measures\n\tpartition _Measures = calculated\n",

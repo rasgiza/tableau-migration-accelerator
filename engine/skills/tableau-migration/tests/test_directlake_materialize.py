@@ -182,3 +182,78 @@ def test_materialization_script_skips_entries_without_materialization():
     stripped = [{"table": "Orders", "columns": ["X"]}]  # no materialization key
     assert M.build_materialization_script(stripped) is None
 
+
+# ------------------------------------------------------------------------- RELATED inlining
+# The faithful, join-free path: RELATED('Dim'[Col]) inlines Dim[Col]'s own row-level definition with
+# the related KEY column substituted by the source table's FK column. Correct-or-abstain.
+_DATE_RELATED = {
+    "source_table": "Orders",
+    "rels": [
+        {"from_table": "Orders", "from_col": "Order_Date", "to_table": "Date",
+         "to_col": "Date", "active": True},
+        {"from_table": "Orders", "from_col": "Ship_Date", "to_table": "Date",
+         "to_col": "Date", "active": False},
+    ],
+    "coldefs": {
+        ("Date", "Year"): "YEAR('Date'[Date])",
+        ("Date", "Month No"): "MONTH('Date'[Date])",
+        ("Date", "Quarter"): "\"Q\" & QUARTER('Date'[Date])",
+        ("Date", "DayName"): "FORMAT('Date'[Date], \"dddd\")",  # FORMAT -> not translatable
+    },
+}
+
+
+def test_related_inlines_year_to_source_date_part():
+    sql = _sql("RELATED('Date'[Year])", column_map={"Order_Date": "Order Date"},
+               related=_DATE_RELATED)
+    assert sql == "YEAR(`Order Date`)"
+
+
+def test_related_inlines_month_no():
+    sql = _sql("RELATED('Date'[Month No])", column_map={"Order_Date": "Order Date"},
+               related=_DATE_RELATED)
+    assert sql == "MONTH(`Order Date`)"
+
+
+def test_related_inlines_inside_larger_expression():
+    sql = _sql("RELATED('Date'[Year]) * 100", column_map={"Order_Date": "Order Date"},
+               related=_DATE_RELATED)
+    assert sql == "(YEAR(`Order Date`) * 100)"
+
+
+def test_related_without_context_abstains():
+    r = M.dax_to_sql("RELATED('Date'[Year])")
+    assert not r["ok"] and "RELATED" in r["reason"]
+
+
+def test_related_abstains_when_no_single_active_relationship():
+    ctx = dict(_DATE_RELATED, rels=[])  # no relationship to Date
+    r = M.dax_to_sql("RELATED('Date'[Year])", related=ctx)
+    assert not r["ok"] and "relationship" in r["reason"].lower()
+
+
+def test_related_abstains_on_untranslatable_target_definition():
+    # DayName uses FORMAT(), which the translator does not support -> abstain, never guess.
+    r = M.dax_to_sql("RELATED('Date'[DayName])", column_map={"Order_Date": "Order Date"},
+                     related=_DATE_RELATED)
+    assert not r["ok"]
+
+
+def test_related_abstains_when_target_is_physical_column():
+    # No coldef for the target -> it is a physical column, which would need a join.
+    r = M.dax_to_sql("RELATED('Date'[Date])", related=_DATE_RELATED)
+    assert not r["ok"] and "join" in r["reason"].lower()
+
+
+def test_related_build_table_view_covers_year_and_month():
+    cols = [
+        {"name": "Year", "dax": "RELATED('Date'[Year])"},
+        {"name": "Month", "dax": "RELATED('Date'[Month No])"},
+    ]
+    out = M.build_table_view("Orders", cols, {"Order_Date": "Order Date"}, schema="dbo",
+                             related=_DATE_RELATED)
+    assert out["covered"] == 2 and out["needs_manual"] == 0
+    assert "YEAR(`Order Date`) AS `Year`" in out["sql"]
+    assert "MONTH(`Order Date`) AS `Month`" in out["sql"]
+
+
