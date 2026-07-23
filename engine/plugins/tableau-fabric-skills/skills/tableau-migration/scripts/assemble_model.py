@@ -60,6 +60,8 @@ try:  # package or scripts-on-path
         _INLINE_REF_SENTINEL,
     )
     from .translation_router import classify_fallback
+    from .directlake_remediation import classify_stripped_columns, MATERIALIZE_UPSTREAM
+    from .directlake_materialize import build_table_view
     from . import tmdl_generate as T
     from .parameters import (
         parse_parameters,
@@ -106,6 +108,8 @@ except ImportError:
         _INLINE_REF_SENTINEL,
     )
     from translation_router import classify_fallback
+    from directlake_remediation import classify_stripped_columns, MATERIALIZE_UPSTREAM
+    from directlake_materialize import build_table_view
     import tmdl_generate as T
     from parameters import (
         parse_parameters,
@@ -1886,6 +1890,24 @@ def _calc_columns_part(dim_calcs, resolve, anchor_table, *,
     """
     by_table = {}
     report = []
+    # Drop EXACT-duplicate calc definitions (same name + same formula), keeping the first. A
+    # consolidated multi-datasource workbook can surface the same dimension calc from more than one
+    # island (e.g. a shared ``Manufacturer`` grouping), which would otherwise emit two identically
+    # named calculated columns on the same home table -- a TMDL that Fabric rejects on import
+    # ("objects cannot be merged because both declare the same property"). Two columns can never
+    # share a name on one table, and an identical definition resolves to the same home table, so
+    # de-duping here is loss-free. Order is preserved; a same-name/different-formula genuine conflict
+    # is left untouched for the downstream single-table guard to surface.
+    if dim_calcs:
+        _seen_calc = set()
+        _deduped = []
+        for _c in dim_calcs:
+            _key = ((_c.get("name") or "").casefold(), _c.get("formula") or "")
+            if _key in _seen_calc:
+                continue
+            _seen_calc.add(_key)
+            _deduped.append(_c)
+        dim_calcs = _deduped
     consumed_lower = {(c or "").lower() for c in (consumed or set())}
     approved_lower = {(k or "").lower(): v for k, v in (approved_calc_dax or {}).items()}
     active_date_cols = active_date_cols or set()
@@ -1910,11 +1932,37 @@ def _calc_columns_part(dim_calcs, resolve, anchor_table, *,
     # when no calc references a sibling -> the main loop is byte-identical to the prior single pass.
     column_refs = _build_column_refs(dim_calcs, _arc, known_tables, consumed_lower=consumed_lower,
                                      relationships=relationships)
+    # Per-(table, name) emission guard. Two calculated columns can NEVER share a name on one table --
+    # a TMDL that Fabric rejects on import ("objects cannot be merged because both declare the same
+    # property"). A consolidated multi-datasource workbook can surface two different-formula calcs that
+    # both carry the same caption and resolve to the same fact table (e.g. two ``Manufacturer`` product
+    # groupings). Keep the FIRST faithful landing and record every later same-name/same-table calc as a
+    # ``skipped-duplicate`` report row for audit. Keyed per target table so a genuinely distinct calc
+    # of the same name on a DIFFERENT table still lands. The exact-duplicate collapse above already
+    # removed byte-identical repeats, so this only fires for real (differing) same-name conflicts.
+    _emitted_cols = {}
+
+    def _is_dup(target, colname):
+        seen = _emitted_cols.setdefault(target, set())
+        key = (colname or "").casefold()
+        if key in seen:
+            return True
+        seen.add(key)
+        return False
+
     for calc in dim_calcs or []:
         name, formula = calc["name"], calc.get("formula", "")
         if name.lower() in consumed_lower:
             continue
         if _is_stock_row_count_calc(calc):
+            if _is_dup(anchor_table, name):
+                report.append({
+                    "column": name, "table": anchor_table, "status": "skipped-duplicate",
+                    "reason": "duplicate column name on table", "dax": None,
+                    "tableau_formula": formula, "date_bound": False,
+                    "date_table": None, "date_attribute": None,
+                })
+                continue
             # Tableau's stock 1-per-row field -> a real column of 1s on the fact (anchor) table,
             # int64 + summarizeBy sum so dropping it into a visual SUMs to the row count (matching
             # Tableau's auto-aggregation). Faithful, unlike the nonsense ``measure = 1`` the naive
@@ -1940,6 +1988,14 @@ def _calc_columns_part(dim_calcs, resolve, anchor_table, *,
                     bound_attr = (resolved[0], date_column)
         if bound_attr is not None:
             target, date_column = bound_attr
+            if _is_dup(target, name):
+                report.append({
+                    "column": name, "table": target, "status": "skipped-duplicate",
+                    "reason": "duplicate column name on table", "dax": None,
+                    "tableau_formula": formula, "date_bound": False,
+                    "date_table": None, "date_attribute": None,
+                })
+                continue
             dax = _related_date_dax(date_table, date_column)
             by_table[target] = by_table.get(target, "") + T.generate_calc_column_tmdl(
                 name, formula, dax, translated_by="deterministic (date dimension)")
@@ -1957,6 +2013,14 @@ def _calc_columns_part(dim_calcs, resolve, anchor_table, *,
             target = next(iter(tables_used))
         else:                                # constant DAX, or stub with no/ambiguous home
             target = anchor_table
+        if _is_dup(target, name):
+            report.append({
+                "column": name, "table": target, "status": "skipped-duplicate",
+                "reason": "duplicate column name on table", "dax": None,
+                "tableau_formula": formula, "date_bound": False,
+                "date_table": None, "date_attribute": None,
+            })
+            continue
         # Deterministic fallback -> a human-approved assisted translation (the column-mode peer of
         # the measures' approved_calc_dax landing). Consulted ONLY when Tier 0 produced no DAX, so a
         # faithful deterministic column is never overridden; the approved expression lands LIVE.
@@ -3107,6 +3171,31 @@ DIRECTLAKE_SEAM_URL_PLACEHOLDER = (
     "https://onelake.dfs.fabric.microsoft.com/<workspace-id>/<lakehouse-id>/Tables"
 )
 
+# Process-wide (estate-run-scoped) DirectLake seam target. The estate CLI resolves ONE lakehouse /
+# mirrored-database OneLake ``Tables`` URL for the whole run (``--directlake-url``) and configures it
+# here via :func:`configure_directlake_seam`, so EVERY extract-backed model the run emits -- through
+# the workbook chain, the standalone-datasource pass, the published-match rebuild, or the rebind-plan
+# resolver -- shares the same real seam URL without threading the value through each call chain. An
+# explicit ``directlake_url=`` argument to :func:`migrate_datasource` always wins; when neither is set
+# the placeholder above is emitted. ``schema`` follows the same precedence (default ``"dbo"``).
+_DIRECTLAKE_SEAM_URL = None
+_DIRECTLAKE_SEAM_SCHEMA = "dbo"
+
+
+def configure_directlake_seam(url, schema="dbo"):
+    """Set (or clear, with ``url=None``) the process-wide extract-backed DirectLake seam target.
+
+    Estate-run configuration, not per-call state: the CLI calls this ONCE before a run so every
+    emitted extract-backed model binds to the same real OneLake ``Tables`` URL. Returns the previous
+    ``(url, schema)`` so a caller (or a test) can restore it. An explicit ``directlake_url=`` passed to
+    :func:`migrate_datasource` still overrides this for an individual datasource.
+    """
+    global _DIRECTLAKE_SEAM_URL, _DIRECTLAKE_SEAM_SCHEMA
+    prev = (_DIRECTLAKE_SEAM_URL, _DIRECTLAKE_SEAM_SCHEMA)
+    _DIRECTLAKE_SEAM_URL = url or None
+    _DIRECTLAKE_SEAM_SCHEMA = "dbo" if schema is None else schema
+    return prev
+
 # A table's TABLE-LEVEL Power Query partition header (``\tpartition <name> = m``). Only these base
 # source tables are rebound onto DirectLake entities; ``= calculated`` (``_Measures`` / ``Date`` /
 # field-parameter tables) and any already-``= entity`` table are carried through untouched.
@@ -3120,6 +3209,124 @@ def _unquote_tmdl_name(name):
     if len(n) >= 2 and n[0] == "'" and n[-1] == "'":
         return n[1:-1].replace("''", "'")
     return n
+
+
+# A calculated column carries a DAX expression on its header line (``column NAME = <dax>``); a
+# physical/data column does NOT (``column NAME`` followed by ``dataType:`` / ``sourceColumn:``).
+# A top-level table member is indented exactly one tab (columns, hierarchies, the partition); a
+# member's continuation lines (DAX body, ``dataType:``, annotations) are indented deeper.
+_TMDL_TOPLEVEL_MEMBER_RE = re.compile(r"^\t(column|hierarchy|partition)\b")
+_TMDL_CALC_COLUMN_HEADER_RE = re.compile(r"^\tcolumn\s+(?:'([^']+)'|([^\s=]+))\s*=")
+# A two-tab-indented ``key: value`` property line (dataType:, lineageTag:, summarizeBy:, ...). Used
+# to detect where a calc column's DAX expression ends and its properties begin.
+_TMDL_PROPERTY_LINE_RE = re.compile(r"^\t\t[A-Za-z_][\w.]*:")
+# A retained *physical* column header (no ``=``) and its Delta ``sourceColumn`` -- used to map each
+# TMDL column name to the real Lakehouse column name when emitting materialization SQL.
+_TMDL_PHYSICAL_COLUMN_HEADER_RE = re.compile(r"^\tcolumn\s+(?:'([^']+)'|([^\s=]+))\s*$")
+_TMDL_SOURCE_COLUMN_RE = re.compile(r'^\t\tsourceColumn:\s*(?:"([^"]+)"|(\S+))')
+
+
+def _physical_column_map(body):
+    """Map each retained physical column's TMDL name -> its Delta ``sourceColumn`` name.
+
+    Materialization SQL must reference the real Lakehouse column names (e.g. ``Order Date``), but the
+    stripped calc columns' DAX uses the TMDL-sanitized names (e.g. ``Order_Date``). ``body`` is a
+    calc-columns-already-removed table body, so only physical, ``sourceColumn``-backed columns remain.
+    """
+    mapping = {}
+    current = None
+    for line in body.split("\n"):
+        m = _TMDL_PHYSICAL_COLUMN_HEADER_RE.match(line)
+        if m:
+            current = m.group(1) or m.group(2)
+            continue
+        s = _TMDL_SOURCE_COLUMN_RE.match(line)
+        if s and current:
+            mapping[current] = s.group(1) or s.group(2)
+            current = None
+    return mapping
+
+# CALENDARAUTO() builds its date range by implicitly scanning EVERY date column in the model --
+# including columns on DirectLake tables. That makes the calculated Date table a "calculated table
+# referring to a Direct Lake data source", which the engine refuses to refresh. On the DirectLake
+# seam we replace CALENDARAUTO() with an explicit, bounded CALENDAR() over a wide default range so the
+# date table stays fully functional WITHOUT implicitly binding to the DirectLake source. (In pure
+# Import mode CALENDARAUTO() is correct and is left untouched -- this runs only when base tables were
+# actually rebound onto DirectLake.) The range is deliberately wide; the rewrite is surfaced in the
+# migration report so a customer can narrow/extend it if their data falls outside it.
+_DIRECTLAKE_CALENDAR_MIN_YEAR = 2010
+_DIRECTLAKE_CALENDAR_MAX_YEAR = 2035
+_CALENDARAUTO_RE = re.compile(r"CALENDARAUTO\s*\([^)]*\)", re.IGNORECASE)
+
+
+def _neutralize_calendarauto_in_parts(parts, *, min_year, max_year):
+    """Replace ``CALENDARAUTO(...)`` with an explicit bounded ``CALENDAR()`` in every table part.
+
+    Returns ``(new_parts, adjustments)`` where ``adjustments`` is ``[{"table", "from", "to"}]`` for
+    each table whose calendar expression was rewritten (empty when no CALENDARAUTO is present).
+    ``parts`` is not mutated. See the module note above for why this is required on the DirectLake
+    seam: CALENDARAUTO implicitly scans DirectLake date columns, which the engine rejects.
+    """
+    replacement = f"CALENDAR(DATE({min_year}, 1, 1), DATE({max_year}, 12, 31))"
+    new_parts = dict(parts)
+    adjustments = []
+    for path, text in parts.items():
+        if not (path.startswith("definition/tables/") and path.endswith(".tmdl")):
+            continue
+        if not isinstance(text, str) or "CALENDARAUTO" not in text.upper():
+            continue
+        new_text, n = _CALENDARAUTO_RE.subn(replacement, text)
+        if n:
+            new_parts[path] = new_text
+            first_line = text.split("\n", 1)[0]
+            disp = (_unquote_tmdl_name(first_line[len("table "):])
+                    if first_line.startswith("table ") else path)
+            adjustments.append({"table": disp, "from": "CALENDARAUTO()", "to": replacement})
+    return new_parts, adjustments
+
+
+def _strip_calc_columns_from_body(body):
+    """Remove calculated-column blocks from a table body, returning ``(clean_body, [{name, dax}])``.
+
+    Direct Lake tables physically read Delta columns and CANNOT carry calculated columns (the AS
+    engine rejects them at import: "Standard expression context may not be used for calculated
+    columns in Direct Lake tables"). When a base table is rebound onto a DirectLake entity partition
+    its calculated columns must therefore be dropped -- the caller surfaces each dropped column's
+    NAME and its translated DAX EXPRESSION so a downstream router can decide the correct remediation
+    (materialize upstream / field parameter / measure worklist) instead of a blanket "dropped".
+    Physical (``sourceColumn``-backed) columns and hierarchies are preserved byte-for-byte.
+
+    ``body`` is the text between the ``table`` header and the trailing ``partition`` line (it opens
+    with a newline). Boundaries are detected structurally on single-tab-indented members, so a
+    calc column's multi-line DAX body (deeper-indented) is skipped wholesale. The DAX expression is
+    the text after ``=`` on the header line plus any continuation lines, up to the first ``\t\t``
+    property line (``dataType:`` / ``lineageTag:`` / ...); properties are not part of the expression.
+    """
+    lines = body.split("\n")
+    kept, stripped = [], []
+    i, n = 0, len(lines)
+    while i < n:
+        m = _TMDL_CALC_COLUMN_HEADER_RE.match(lines[i])
+        if m:
+            name = m.group(1) or m.group(2)
+            header = lines[i]
+            # DAX starts after the '=' on the header line; a property line ends the expression.
+            expr_parts, in_expr = [], True
+            after_eq = header.split("=", 1)[1].strip() if "=" in header else ""
+            if after_eq:
+                expr_parts.append(after_eq)
+            i += 1
+            while i < n and not _TMDL_TOPLEVEL_MEMBER_RE.match(lines[i]):
+                if in_expr and _TMDL_PROPERTY_LINE_RE.match(lines[i]):
+                    in_expr = False  # remaining lines are properties, not expression
+                elif in_expr and lines[i].strip():
+                    expr_parts.append(lines[i].strip())
+                i += 1  # skip the calc column's (possibly multi-line) body
+            stripped.append({"name": name, "dax": " ".join(expr_parts).strip()})
+            continue
+        kept.append(lines[i])
+        i += 1
+    return "\n".join(kept), stripped
 
 
 def _model_table_role_refs(model_tmdl):
@@ -3158,16 +3365,24 @@ def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlak
     the target lakehouse schema (default ``"dbo"``; pass ``None``/``""`` for a classic non-schema
     lakehouse, matching ``generate_table_tmdl``).
 
-    Returns ``(new_parts, landed)`` where ``landed`` is ``[{"table", "delta_name"}]`` for each
-    rebound base table -- the landing manifest the caller surfaces so a customer / pipeline knows
-    exactly which Delta tables to mirror. When NOTHING is rebindable (no ``= m`` base table) the
-    original parts are returned unchanged with an empty manifest.
+    Returns ``(new_parts, landed, stripped, calendar_adjustments)`` where ``landed`` is
+    ``[{"table", "delta_name"}]`` for each rebound base table -- the landing manifest the caller
+    surfaces so a customer / pipeline knows exactly which Delta tables to mirror -- ``stripped`` is
+    ``[{"table", "columns": [...], "remediation": {...}}]`` naming any calculated columns removed from
+    a rebound table (Direct Lake tables cannot carry calculated columns) plus a per-column remediation
+    plan from :func:`directlake_remediation.classify_stripped_columns` (materialize upstream / field
+    parameter / measure worklist / review), and ``calendar_adjustments`` is ``[{"table", "from", "to"}]``
+    naming
+    any calculated table whose ``CALENDARAUTO()`` was rewritten to a bounded ``CALENDAR()`` (that
+    function implicitly scans DirectLake date columns, which the engine rejects). When NOTHING is
+    rebindable (no ``= m`` base table) the original parts are returned unchanged with empty manifests.
     """
     delta_name_of = delta_name_of or (lambda disp: clean_col(disp))
     schema = (schema_name or "").strip()
     schema_line = f"\t\t\tschemaName: {schema}\n" if schema else ""
     new_parts = dict(parts)
     landed = []
+    stripped = []
     for path, text in parts.items():
         if not (path.startswith("definition/tables/") and path.endswith(".tmdl")):
             continue
@@ -3183,6 +3398,24 @@ def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlak
             continue
         body = text[first_nl:marker]                # "\n<columns + calc columns + hierarchies>"
         disp = _unquote_tmdl_name(table_line[len("table "):])
+        # Direct Lake tables cannot carry calculated columns -- strip them (recording the name and
+        # translated DAX) so the rebound entity table saves; the caller surfaces them for remediation
+        # routing (materialize upstream / field parameter / measure worklist).
+        body, stripped_cols = _strip_calc_columns_from_body(body)
+        if stripped_cols:
+            rem = classify_stripped_columns(stripped_cols)
+            # For the row-level columns routed to materialize-upstream, generate the Lakehouse
+            # materialization SQL (DAX -> Spark SQL) so Direct Lake can read them as physical columns.
+            mat_names = {r["name"] for r in rem["buckets"].get(MATERIALIZE_UPSTREAM, [])}
+            mat_cols = [c for c in stripped_cols if c.get("name") in mat_names]
+            materialization = build_table_view(
+                disp, mat_cols, _physical_column_map(body), schema=schema)
+            stripped.append({
+                "table": disp,
+                "columns": [c["name"] for c in stripped_cols],
+                "remediation": rem,
+                "materialization": materialization,
+            })
         delta = delta_name_of(disp)
         src_lineage = f"[{schema}].[{delta}]" if schema else f"[{delta}]"
         entity = (
@@ -3202,13 +3435,19 @@ def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlak
         )
         landed.append({"table": disp, "delta_name": delta})
     if not landed:
-        return dict(parts), []
+        return dict(parts), [], [], []
     new_parts["definition/expressions.tmdl"] = T.generate_expressions_tmdl(
         expression_name, directlake_url)
     table_names, role_names = _model_table_role_refs(parts.get("definition/model.tmdl", ""))
     new_parts["definition/model.tmdl"] = T.generate_model_tmdl(
         table_names, expression_name, role_names=role_names or None)
-    return new_parts, landed
+    # A calculated table (e.g. the Date calendar) using CALENDARAUTO() implicitly scans DirectLake
+    # date columns -- the engine rejects that ("calculated table referring to Direct Lake data
+    # source"). Now that base tables are DirectLake-bound, rewrite CALENDARAUTO() to a bounded
+    # CALENDAR() so no calculated table implicitly binds to the source; surface it for the customer.
+    new_parts, calendar_adjustments = _neutralize_calendarauto_in_parts(
+        new_parts, min_year=_DIRECTLAKE_CALENDAR_MIN_YEAR, max_year=_DIRECTLAKE_CALENDAR_MAX_YEAR)
+    return new_parts, landed, stripped, calendar_adjustments
 
 
 def fabric_definition_payload(parts):
@@ -4024,7 +4263,7 @@ def migrate_datasource(source, *, model_name, write_to=None, as_pbip=False, data
                        descriptor=None,
                        calcs=None, dim_calcs=None, approved_calc_dax=None, date_range=None,
                        local_data=None, packaged_source=None, flatfile_dest_dir=None,
-                       directlake_url=None, directlake_schema="dbo", **kwargs):
+                       directlake_url=None, directlake_schema=None, **kwargs):
     """**One call** from a downloaded datasource to everything needed to land it in Fabric.
 
     ``source`` may be a path to a ``.tdsx``/``.tds``/``.twbx``/``.twb``, raw bytes, or XML text.
@@ -4195,10 +4434,12 @@ def migrate_datasource(source, *, model_name, write_to=None, as_pbip=False, data
             and decision.get("mode") is not None and not decision.get("import_from_extract")
             and is_extract_backed(descriptor)):
         _seam_expr = f"DirectLake - {model_name}"
-        _seam_url = directlake_url or DIRECTLAKE_SEAM_URL_PLACEHOLDER
-        _seam_parts, _landed = convert_import_parts_to_directlake_seam(
+        # Precedence: explicit arg > process-wide estate target (configure_directlake_seam) > placeholder.
+        _seam_url = directlake_url or _DIRECTLAKE_SEAM_URL or DIRECTLAKE_SEAM_URL_PLACEHOLDER
+        _seam_schema = directlake_schema if directlake_schema is not None else _DIRECTLAKE_SEAM_SCHEMA
+        _seam_parts, _landed, _stripped, _calendar = convert_import_parts_to_directlake_seam(
             result["parts"], expression_name=_seam_expr, directlake_url=_seam_url,
-            schema_name=directlake_schema)
+            schema_name=_seam_schema)
         if _landed:
             result["parts"] = _seam_parts
             _rep = result.setdefault("report", {})
@@ -4210,9 +4451,17 @@ def migrate_datasource(source, *, model_name, write_to=None, as_pbip=False, data
             _rep["directlake_seam"] = {
                 "expression": _seam_expr,
                 "directlake_url": _seam_url,
-                "schema": (directlake_schema or "") or None,
-                "url_is_placeholder": directlake_url is None,
+                "schema": (_seam_schema or "") or None,
+                "url_is_placeholder": _seam_url == DIRECTLAKE_SEAM_URL_PLACEHOLDER,
                 "needs_landing": _landed,
+                # Calc columns dropped from the rebound DirectLake tables (unsupported there) --
+                # the customer converts these to measures or materialises them upstream in the
+                # Lakehouse. Empty list when every rebound table was already calc-column-free.
+                "stripped_calc_columns": _stripped,
+                # Calculated tables whose CALENDARAUTO() was rewritten to a bounded CALENDAR() so
+                # they don't implicitly bind to the DirectLake source. The range is wide by default;
+                # a customer narrows/extends it if their data falls outside it. Empty when none.
+                "calendar_adjustments": _calendar,
             }
 
     # Additive, honest record of how flat-file data was (or was not) landed, so a caller -- and the
