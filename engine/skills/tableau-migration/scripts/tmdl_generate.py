@@ -514,11 +514,29 @@ def generate_date_table_tmdl(table_name="Date", *, mark_as_date=True,
         + f"\n\tannotation PBI_Id = {q(table_name)}\n"
     )
 
+def _directlake_item_root(directlake_url):
+    """Normalise a OneLake URL to the *item root* Direct-Lake-on-OneLake requires.
+
+    The shared ``AzureStorage.DataLake`` expression must point at the OneLake item
+    root (``.../<workspaceId>/<itemId>``); the entity partitions navigate down to
+    ``Tables/<entity>`` themselves via ``HierarchicalNavigation=true``. A trailing
+    ``/Tables`` segment makes the engine reject the source at import time with
+    "Direct Lake On OneLake requires a valid OneLake data source", so strip it.
+    """
+    if not directlake_url:
+        return directlake_url
+    trimmed = directlake_url.rstrip("/")
+    if trimmed.lower().endswith("/tables"):
+        trimmed = trimmed[: -len("/tables")]
+    return trimmed
+
+
 def generate_expressions_tmdl(expression_name, directlake_url):
+    item_root = _directlake_item_root(directlake_url)
     return (
         f"expression {q(expression_name)} =\n"
         f"\t\tlet\n"
-        f'\t\t    Source = AzureStorage.DataLake("{directlake_url}", [HierarchicalNavigation=true])\n'
+        f'\t\t    Source = AzureStorage.DataLake("{item_root}", [HierarchicalNavigation=true])\n'
         f"\t\tin\n"
         f"\t\t    Source\n"
         f"\tlineageTag: {uuid.uuid4()}\n\n"
@@ -862,7 +880,11 @@ def generate_platform(display_name):
     }, indent=2)
 
 def encode(text):
-    return base64.b64encode(text.encode('utf-8')).decode('utf-8')
+    # Accept str (TMDL/JSON parts) OR bytes (binary report static resources, e.g. dashboard
+    # PNGs). Bytes are base64-encoded as-is; str is UTF-8 encoded first. Both land as the
+    # ``InlineBase64`` payload Fabric expects for every definition part.
+    raw = text if isinstance(text, (bytes, bytearray)) else text.encode('utf-8')
+    return base64.b64encode(raw).decode('utf-8')
 
 
 # == MODEL OBJECT ENRICHMENT ===================================================
@@ -1572,8 +1594,31 @@ def _inject_hierarchies(table_tmdl, hierarchies):
 def _inject_calc_columns(table_tmdl, calc_columns):
     """Splice pre-rendered calculated-column block(s) into an existing ``table`` TMDL string,
     just before its first ``partition`` declaration (where regular columns live). ``calc_columns``
-    is a single rendered block or an iterable of them (see ``generate_calc_column_tmdl``)."""
+    is a single rendered block or an iterable of them (see ``generate_calc_column_tmdl``).
+
+    De-duplicates by column NAME (case-insensitive): a calc column whose name already exists on the
+    table -- a base column, an earlier-injected calc, or a repeat within this block -- is DROPPED.
+    Two columns can never share a name on one table; a duplicate produces TMDL that Fabric rejects on
+    import ("objects cannot be merged because both declare the same property"). A consolidated
+    multi-datasource workbook legitimately surfaces the same group/bin/calc from more than one island
+    (e.g. a shared ``Manufacturer`` grouping defined on two embedded datasources), so this guard fires
+    for real inputs -- keeping the FIRST landing. This is the universal chokepoint for calc-column
+    injection (both the group/bin path and the dimension-calc path route through ``enrich_table_tmdl``),
+    so it fixes duplicates regardless of which upstream path produced them."""
     block = calc_columns if isinstance(calc_columns, str) else "".join(calc_columns)
+    if not block:
+        return table_tmdl
+    existing = _column_names_in_table_tmdl(table_tmdl)
+    kept = []
+    for frag in _split_calc_column_fragments(block):
+        name = _calc_column_fragment_name(frag)
+        key = name.casefold() if name else None
+        if key is not None and key in existing:
+            continue  # duplicate name (base column, earlier calc, or repeat in this block) -> drop
+        if key is not None:
+            existing.add(key)
+        kept.append(frag)
+    block = "".join(kept)
     if not block:
         return table_tmdl
     idx = table_tmdl.find("\tpartition ")
@@ -1581,6 +1626,32 @@ def _inject_calc_columns(table_tmdl, calc_columns):
         return table_tmdl + block
     line_start = table_tmdl.rfind("\n", 0, idx) + 1
     return table_tmdl[:line_start] + block + table_tmdl[line_start:]
+
+
+# A top-level ``column`` declaration in a table TMDL: one leading tab, then the (optionally quoted)
+# name, up to a space, ``=`` (calc column), or end of line (base column).
+_TMDL_COLUMN_HEADER = re.compile(r"^\tcolumn\s+(?:'([^']+)'|([^\s=]+))", re.M)
+
+
+def _column_names_in_table_tmdl(table_tmdl):
+    """The set of casefolded column names already declared on a rendered ``table`` TMDL string
+    (both base ``column X`` and calc ``column X =`` forms)."""
+    return {(m.group(1) or m.group(2)).casefold() for m in _TMDL_COLUMN_HEADER.finditer(table_tmdl)}
+
+
+def _split_calc_column_fragments(block):
+    """Split a concatenation of ``generate_calc_column_tmdl`` outputs back into per-column fragments.
+
+    Each fragment starts with a leading ``\\n\\tcolumn `` (the renderer always prefixes ``\\n\\t``),
+    so a lookahead split preserves that boundary. Empty leading segment is discarded."""
+    return [p for p in re.split(r"(?=\n\tcolumn )", block) if p.strip()]
+
+
+def _calc_column_fragment_name(frag):
+    """The column name declared by one calc-column fragment (quoted or bare), or ``None``."""
+    m = re.search(r"\n\tcolumn\s+(?:'([^']+)'|([^\s=]+))", frag)
+    return (m.group(1) or m.group(2)) if m else None
+
 
 
 def enrich_table_tmdl(table_tmdl, *, display_folders=None, hierarchies=None, calc_columns=None):

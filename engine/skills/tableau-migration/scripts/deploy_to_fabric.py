@@ -86,9 +86,11 @@ _GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
 # Files that make up a .SemanticModel definition. All are UTF-8 text.
 _MODEL_EXT = (".tmdl", ".json", ".pbism")
 _MODEL_DOTFILE = (".platform",)
-# Files that make up a .Report (PBIR) definition. All are UTF-8 text; ``.pbir`` is listed so the
-# required ``definition.pbir`` (which ``_MODEL_EXT`` would miss) is captured. The viz stage emits no
-# binary static resources, so a plain text read is faithful.
+# Text files that make up a .Report (PBIR) definition; ``.pbir`` is listed so the required
+# ``definition.pbir`` (which ``_MODEL_EXT`` would miss) is captured. Binary static resources
+# (registered dashboard images under ``StaticResources/``) are captured separately as raw bytes --
+# see ``read_report_folder`` -- because a report that references an image fails to import if the
+# image part is dropped (``Workload_MissingFileFromDefinition``).
 _REPORT_EXT = (".pbir", ".json")
 _REPORT_DOTFILE = (".platform",)
 
@@ -143,21 +145,30 @@ def read_report_folder(report_dir):
     """Read a ``<Name>.Report`` folder into a ``{relative/forward/slash/path: text}`` dict.
 
     The report twin of :func:`read_model_folder`: every ``.pbir`` / ``.json`` / ``.platform`` file
-    under ``report_dir`` becomes a part keyed by its POSIX-style relative path (the shape the Fabric
-    definition payload expects). The allow-list includes ``.pbir`` so the required ``definition.pbir``
-    -- which ``read_model_folder`` would skip -- is captured. PBIR report parts are all UTF-8 text;
-    the viz stage emits no binary static resources. Raises ``FileNotFoundError`` if nothing is found.
+    under ``report_dir`` becomes a text part keyed by its POSIX-style relative path (the shape the
+    Fabric definition payload expects). The allow-list includes ``.pbir`` so the required
+    ``definition.pbir`` -- which ``read_model_folder`` would skip -- is captured.
+
+    Binary static resources (registered dashboard images under ``StaticResources/`` -- PNG/JPG/SVG,
+    etc.) are ALSO captured, as raw ``bytes``: the report's ``.json`` references them by path, so
+    dropping them makes Fabric reject the import (``Workload_MissingFileFromDefinition``).
+    ``fabric_definition_payload`` base64-encodes bytes and text alike into ``InlineBase64`` parts.
+    Raises ``FileNotFoundError`` if nothing is found.
     """
     parts = {}
     walk_root = _win_long_path(report_dir)  # lift MAX_PATH; rel keys computed against this same base
     for root, _dirs, files in os.walk(walk_root):
         for fname in files:
-            if not (fname.endswith(_REPORT_EXT) or fname in _REPORT_DOTFILE):
-                continue
             full = os.path.join(root, fname)
             rel = os.path.relpath(full, walk_root).replace(os.sep, "/")
-            with open(full, encoding="utf-8") as fh:
-                parts[rel] = fh.read()
+            if fname.endswith(_REPORT_EXT) or fname in _REPORT_DOTFILE:
+                with open(full, encoding="utf-8") as fh:
+                    parts[rel] = fh.read()
+            elif "StaticResources/" in rel:
+                # A registered dashboard image (or other binary resource) the report references.
+                # Read raw bytes so it round-trips faithfully through base64 into the payload.
+                with open(full, "rb") as fh:
+                    parts[rel] = fh.read()
     if not parts:
         raise FileNotFoundError(f"no report (PBIR) parts found under {report_dir!r}")
     return parts

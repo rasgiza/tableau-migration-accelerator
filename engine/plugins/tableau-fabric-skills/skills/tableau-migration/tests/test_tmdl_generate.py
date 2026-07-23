@@ -411,3 +411,34 @@ def test_inject_calc_columns_appends_when_no_partition():
     out = enrich_table_tmdl(base, calc_columns=calc)
     assert out.startswith(base)
     assert "column C =" in out
+
+
+def test_inject_calc_columns_drops_duplicate_within_block():
+    # A consolidated multi-datasource workbook can surface the same group/bin/calc from two islands.
+    # Injecting a block that declares the same column name twice must land it exactly once -- a
+    # duplicate is TMDL Fabric rejects on import ("objects cannot be merged ... same property").
+    calc = (generate_calc_column_tmdl("Manufacturer", 'GROUP([Product Name])', 'SWITCH(TRUE(), "A")')
+            + generate_calc_column_tmdl("Manufacturer", 'GROUP([Product Name])', 'SWITCH(TRUE(), "B")'))
+    out = enrich_table_tmdl(_SAMPLE_TABLE, calc_columns=calc)
+    assert out.count("column Manufacturer =") == 1
+    # the FIRST landing is kept.
+    assert '"A"' in out and '"B"' not in out
+
+
+def test_inject_calc_columns_drops_name_colliding_with_base_column():
+    # A calc column whose name matches an EXISTING base column on the table is dropped (never a
+    # second same-named column). ``_SAMPLE_TABLE`` already declares a base ``Sales`` column.
+    calc = generate_calc_column_tmdl("Sales", "[Sales]*2", "'Orders'[Sales]*2")
+    out = enrich_table_tmdl(_SAMPLE_TABLE, calc_columns=calc)
+    assert out.count("column Sales") == 1
+    assert "column Sales =" not in out  # base column preserved, calc dropped
+
+
+def test_inject_calc_columns_keeps_distinct_names():
+    # Distinct calc columns all land -- the dedup only drops genuine name collisions.
+    calc = (generate_calc_column_tmdl("One", "[Sales]", "'Orders'[Sales]")
+            + generate_calc_column_tmdl("Two", "[Sales]", "'Orders'[Sales]"))
+    out = enrich_table_tmdl(_SAMPLE_TABLE, calc_columns=calc)
+    assert "column One =" in out
+    assert "column Two =" in out
+

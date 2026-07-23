@@ -56,6 +56,7 @@ try:  # works whether imported as a package or run with scripts/ on sys.path
     from .assemble_model import (assemble_import_model, assemble_local_import_model,
                                  materialize_bundled_flatfile_data, write_model_folder,
                                  write_local_pbip, migrate_datasource, list_workbook_datasources,
+                                 configure_directlake_seam,
                                  _win_long_path)
     from .parameters import parse_parameters
     from .workbook_table_calcs import extract_table_calc_usages, load_workbook_xml
@@ -70,6 +71,7 @@ except ImportError:
     from assemble_model import (assemble_import_model, assemble_local_import_model,
                                 materialize_bundled_flatfile_data, write_model_folder,
                                 write_local_pbip, migrate_datasource, list_workbook_datasources,
+                                configure_directlake_seam,
                                 _win_long_path)
     from parameters import parse_parameters
     from workbook_table_calcs import extract_table_calc_usages, load_workbook_xml
@@ -908,6 +910,11 @@ def _migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir=None, 
         skipped_tables=report.get("skipped_tables", []),
         partitions_needs_review=report.get("partitions_needs_review", []),
         partitions_stubbed=report.get("partitions_stubbed", 0),
+        # DirectLake-over-OneLake seam audit (present only when the extract-backed seam rebound this
+        # datasource's base tables): the Delta landing manifest, any calc columns stripped from
+        # DirectLake tables, and any CALENDARAUTO() rewritten to a bounded CALENDAR(). Surfaced in
+        # the HTML report so every run documents exactly what to mirror and what a human must finish.
+        directlake_seam=report.get("directlake_seam"),
         table_count=len(report.get("tables", [])),
         column_count=sum(len(r.get("columns", [])) for r in eligible),
         measures=measures,
@@ -2350,6 +2357,14 @@ def _build_datasource_pbip(entry, wb_detail, twb_text, result, ds, *, label, mod
                   bound_model=model_safe,
                   column_prune=res_report.get("column_prune"),
                   model_translation_handoff=res_report.get("translation_handoff"))
+    # DirectLake-over-OneLake seam audit (present only when the extract-backed seam rebound this
+    # workbook's base tables): the Delta landing manifest, any stripped calc columns, and any
+    # CALENDARAUTO() rewrite. A consolidated workbook builds its model in THIS path, so the seam
+    # audit lives on the workbook entry (the datasource-level rollup is empty for it). Surfaced in
+    # the HTML report so every run documents exactly what to mirror and what a human must finish.
+    _dl_seam = res_report.get("directlake_seam")
+    if _dl_seam:
+        entry["directlake_seam"] = _dl_seam
     # Surface the model's structural openability self-check (produced by the datasource build) onto the
     # entry so the workbook definition-of-done can FAIL LOUD when a report bound to a non-openable model
     # (e.g. a duplicate column that survived to TMDL) is produced -- a built .pbip is not the same as an
@@ -3975,6 +3990,15 @@ def main(argv=None):
                              "measure/column descriptions). On by default so the emitted model is "
                              "grounded for Power BI Q&A / Copilot; pass this to emit the leaner, "
                              "description-free model instead")
+    parser.add_argument("--directlake-url", metavar="URL", default=None,
+                        help="OneLake 'Tables' URL of the lakehouse / mirrored database that "
+                             "extract-backed sources rebind to as a DirectLake-over-OneLake seam "
+                             "(e.g. https://onelake.dfs.fabric.microsoft.com/<ws-id>/<item-id>/"
+                             "Tables). When omitted, extract-backed models emit a placeholder URL "
+                             "the customer edits after mirroring the source to OneLake as Delta.")
+    parser.add_argument("--directlake-schema", metavar="NAME", default="dbo",
+                        help="Lakehouse schema for the DirectLake seam (default: dbo). Pass an empty "
+                             "string for a classic non-schema lakehouse.")
     args = parser.parse_args(argv)
 
     # Preflight: fail loudly and EARLY on the two things a tester most often gets wrong -- an old
@@ -4002,6 +4026,12 @@ def main(argv=None):
     second_compile = bool(args.second_compile or authored)
 
     source = LocalFilesSource(args.input)
+
+    # Configure the process-wide extract-backed DirectLake seam target ONCE for the whole run, so
+    # every emitted extract-backed model (workbook rebuild, standalone-datasource pass, published
+    # match, rebind resolver) shares the same real OneLake 'Tables' URL. When --directlake-url is
+    # omitted the placeholder is emitted (byte-identical to before this flag existed).
+    configure_directlake_seam(args.directlake_url, args.directlake_schema)
 
     # No Tableau assets in scope -> stop with an actionable message instead of emitting an empty
     # bundle (or an empty scan) that looks like a successful no-op.
