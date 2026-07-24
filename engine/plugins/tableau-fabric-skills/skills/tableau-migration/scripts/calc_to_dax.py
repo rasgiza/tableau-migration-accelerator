@@ -26,7 +26,9 @@ Translates a SAFE subset of Tableau calculated fields into working DAX measures:
     case-sensitive EXACT chain (EXACT(x, a) || EXACT(x, b) ...); one consistent element type
   * boolean logic: AND -> && , OR -> || , NOT(x)
   * null handling: ZN(x) -> COALESCE(x, 0) ; IFNULL(a, b) -> COALESCE(a, b) ;
-    ISNULL(x) -> ISBLANK(x)
+    ISNULL(x) -> ISBLANK(x) ; the bare Tableau NULL keyword -> BLANK() (a typeless null literal,
+    valid only in an IF/CASE/IIF branch -- so `SUM(IF c THEN [x] ELSE NULL END)` folds to
+    SUMX('T', IF(c, [x], BLANK())); NULL anywhere else hits a type guard and falls back)
   * string literals "..." / '...'
   * FIXED / INCLUDE level-of-detail expressions wrapped in an outer aggregation:
     AGG({FIXED d1,d2,...: inner}) -> AGG_X(SUMMARIZE('T', 'T'[d1], ...), CALCULATE(inner))
@@ -698,12 +700,18 @@ class _Parser:
             else_node = self._expr()
         self._expect_kw("END")
         # All THEN/ELSE branches must return the same data type (DAX requires a single
-        # return type; mixed number/text/bool would error or silently coerce).
-        dtype = branches[0][1][1]
+        # return type; mixed number/text/bool would error or silently coerce). A typeless NULL
+        # branch (dtype "null") is compatible with any concrete branch and never forces the type;
+        # the result type is the single concrete branch type (or "null" only when every branch is
+        # NULL).
+        concrete = [then[1] for _, then in branches if then[1] != "null"]
+        if else_node is not None and else_node[1] != "null":
+            concrete.append(else_node[1])
+        dtype = concrete[0] if concrete else "null"
         for _, then in branches:
-            if then[1] != dtype:
+            if then[1] != "null" and then[1] != dtype:
                 raise _CalcError("IF branches return inconsistent types")
-        if else_node is not None and else_node[1] != dtype:
+        if else_node is not None and else_node[1] != "null" and else_node[1] != dtype:
             raise _CalcError("IF/ELSE branches return inconsistent types")
         # Fold ELSEIF chain into nested DAX IF, inside-out. No ELSE -> 2-arg IF (BLANK
         # when unmatched), matching Tableau's null result for an unmatched IF.
@@ -962,6 +970,15 @@ class _Parser:
                 return self._scalar_fn(u)
             if u in _ROW_LEVEL_FNS:
                 return self._row_fn(u)
+            if u == "NULL":
+                # Tableau's bare NULL keyword is a typeless null literal (functions_operators.htm
+                # "Literal Expressions"). Emit DAX BLANK() with a wildcard "null" dtype that is
+                # compatible with any IF/CASE/IIF branch and never forces the result type (so
+                # SUM(IF c THEN [x] ELSE NULL END) folds to SUMX('T', IF(c, [x], BLANK()))). It stays
+                # contained: any operator/scalar fn receiving it hits an _expect_<type> guard and
+                # falls back (correct-or-abstain).
+                self._next()
+                return ("BLANK()", "null")
             raise _CalcError(f"unsupported function {v}")
         if k == "field":
             if self.mode == "column":
@@ -992,9 +1009,11 @@ class _Parser:
         if self._peek() == ("op", ","):
             raise _CalcError("4-arg IIF (unknown branch) not supported")
         self._expect_op(")")
-        if a[1] != b[1]:
+        # A typeless NULL branch is compatible with the other branch and does not force the type.
+        if a[1] != "null" and b[1] != "null" and a[1] != b[1]:
             raise _CalcError("IIF branches return inconsistent types")
-        return (f"IF({cond[0]}, {a[0]}, {b[0]})", a[1])
+        rtype = a[1] if a[1] != "null" else b[1]
+        return (f"IF({cond[0]}, {a[0]}, {b[0]})", rtype)
 
     def _zn(self):
         self._next()  # ZN
@@ -1143,11 +1162,16 @@ class _Parser:
             self._next()
             else_node = self._expr()
         self._expect_kw("END")
-        rtype = pairs[0][1][1]
+        # A typeless NULL result (dtype "null") is compatible with any concrete THEN/ELSE result
+        # and does not force the type (mirrors the IF path).
+        concrete = [result[1] for _, result in pairs if result[1] != "null"]
+        if else_node is not None and else_node[1] != "null":
+            concrete.append(else_node[1])
+        rtype = concrete[0] if concrete else "null"
         for _, result in pairs:
-            if result[1] != rtype:
+            if result[1] != "null" and result[1] != rtype:
                 raise _CalcError("CASE results return inconsistent types")
-        if else_node is not None and else_node[1] != rtype:
+        if else_node is not None and else_node[1] != "null" and else_node[1] != rtype:
             raise _CalcError("CASE/ELSE results return inconsistent types")
         if text_comparand:
             # Fold inside-out into nested IF(EXACT(head, key), result[, inner]). No ELSE -> the
