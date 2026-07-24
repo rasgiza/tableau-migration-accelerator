@@ -318,7 +318,7 @@ def _render_needs_review(report: Dict[str, Any]) -> str:
     if not wb_blocks:
         return ""
     return (
-        '<section><h2>Needs review &mdash; calculation worklist</h2>'
+        '<section id="needs-review"><h2>Needs review &mdash; calculation worklist</h2>'
         '<p class="muted">Every calculation the accelerator would not translate deterministically, '
         "grouped by why. Expand a category for the Tableau formula and the concrete reason. Working "
         "these in Power BI is what moves a workbook from <strong>warn</strong> to sign-off &mdash; "
@@ -409,18 +409,12 @@ def _render_lineage(report: Dict[str, Any]) -> str:
 
 def _render_followups_rollup(report: Dict[str, Any]) -> str:
     """One de-duplicated list of every manual follow-up across all datasources."""
-    seen: List[str] = []
-    for ds in report.get("datasources") or []:
-        sd = ds.get("storage_decision") or {}
-        for f in (ds.get("manual_followups") or []) + (sd.get("manual_followups") or []):
-            f = str(f)
-            if f not in seen:
-                seen.append(f)
+    seen = _dedup_followups(report)
     if not seen:
         return ""
     items = "".join("<li>%s</li>" % _esc(f) for f in seen)
     return (
-        '<section><h2>All manual follow-ups</h2>'
+        '<section id="followups"><h2>All manual follow-ups</h2>'
         '<p class="muted">Every action a human still needs to take, de-duplicated across the '
         "estate.</p><ul class=\"rollup\">%s</ul></section>"
     ) % items
@@ -528,17 +522,7 @@ def _render_directlake(report: Dict[str, Any]) -> str:
     lineage -- honest about what landed automatically and what a customer must finish.
     All values are HTML-escaped; the section is self-contained and needs no JS.
     """
-    seams: List[tuple] = []
-    for ds in report.get("datasources") or []:
-        seam = ds.get("directlake_seam")
-        if seam:
-            seams.append((ds.get("name") or "(unnamed datasource)", seam))
-    # A consolidated workbook builds its model in the workbook path, so its seam audit lives on the
-    # workbook entry (the datasource rollup is empty for it). Read both so no run is missed.
-    for wb in report.get("workbooks") or []:
-        seam = wb.get("directlake_seam")
-        if seam:
-            seams.append((wb.get("name") or "(unnamed workbook)", seam))
+    seams = _iter_directlake_seams(report)
     if not seams:
         return ""
 
@@ -637,7 +621,7 @@ def _render_directlake(report: Dict[str, Any]) -> str:
         )
 
     return (
-        '<section><h2>DirectLake &mdash; OneLake deployment lineage</h2>'
+        '<section id="directlake"><h2>DirectLake &mdash; OneLake deployment lineage</h2>'
         '<p class="muted">How the model binds to live OneLake Delta, and exactly what a human must '
         'finish. The base tables are rebound onto a DirectLake&nbsp;&rarr;&nbsp;OneLake source; the '
         'landing manifest names the Delta tables to mirror or shortcut into the Lakehouse. Any '
@@ -703,7 +687,20 @@ details.cat[open]>summary{border-bottom:1px solid var(--line)}
 .cat-guidance{color:var(--muted);font-size:12px;line-height:1.5;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--bg)}
 details.cat table.grid{font-size:12px}
 details.cat table.grid th{background:var(--bg)}.dl-meta{color:var(--muted);font-size:12px;line-height:1.7;margin:2px 0 10px}
-.dl-sub{font-weight:600;font-size:12px;margin:14px 0 6px}footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+.dl-sub{font-weight:600;font-size:12px;margin:14px 0 6px}
+.outcome-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:8px}
+.outcome-col{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.outcome-col.ok{border-top:3px solid var(--ok)}
+.outcome-col.warn{border-top:3px solid var(--warn)}
+.outcome-col.bad{border-top:3px solid var(--bad)}
+.outcome-h{font-weight:600;font-size:13px;margin-bottom:8px}
+.outcome-col ul{margin:0;padding:0;list-style:none}
+.outcome-col li{margin:5px 0;font-size:13px}
+.outcome-col li.none{color:var(--muted)}
+.outcome-col .n{display:inline-block;min-width:34px;font-weight:600;font-variant-numeric:tabular-nums}
+.outcome-col a{color:var(--accent);text-decoration:none}
+.outcome-col a:hover{text-decoration:underline}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
 """
 
 
@@ -801,11 +798,163 @@ def _render_readiness_guidance(card: Dict[str, Any]) -> str:
     ) % items
 
 
+def _dedup_followups(report: Dict[str, Any]) -> List[str]:
+    """Every manual follow-up across all datasources, de-duplicated in first-seen order.
+
+    Shared by the outcome summary (which needs a count) and the follow-ups rollup (which needs the
+    list) so the two can never disagree on how many actions remain.
+    """
+    seen: List[str] = []
+    for ds in report.get("datasources") or []:
+        sd = ds.get("storage_decision") or {}
+        for f in (ds.get("manual_followups") or []) + (sd.get("manual_followups") or []):
+            f = str(f)
+            if f not in seen:
+                seen.append(f)
+    return seen
+
+
+def _iter_directlake_seams(report: Dict[str, Any]) -> List[tuple]:
+    """``(name, seam)`` for every DirectLake seam in the report, from datasources AND workbooks.
+
+    A consolidated workbook builds its model in the workbook path, so its seam audit lives on the
+    workbook entry (the datasource rollup is empty for it). Reading both means no run is missed.
+    """
+    seams: List[tuple] = []
+    for ds in report.get("datasources") or []:
+        seam = ds.get("directlake_seam")
+        if seam:
+            seams.append((ds.get("name") or "(unnamed datasource)", seam))
+    for wb in report.get("workbooks") or []:
+        seam = wb.get("directlake_seam")
+        if seam:
+            seams.append((wb.get("name") or "(unnamed workbook)", seam))
+    return seams
+
+
+def _outcome_line(count: Any, label: str, anchor: Optional[str] = None) -> str:
+    """One ``<li>`` in an outcome column: a count chip + label, optionally linking to a section."""
+    label_html = _esc(label)
+    if anchor:
+        label_html = '<a href="#%s">%s</a>' % (_esc(anchor), label_html)
+    return '<li><span class="n">%s</span> %s</li>' % (_esc(count), label_html)
+
+
+def _render_outcome_summary(report: Dict[str, Any]) -> str:
+    """A single, exec-facing tri-panel split of the run: **what worked**, **what a human must
+    validate**, and **what is unsupported / stubbed**.
+
+    Pure consumer of facts already in ``report.json`` -- the same numbers the detailed sections
+    below show, aggregated once at the top so a customer knows in ten seconds what they own. Each
+    count links (where applicable) to the section that itemises it. Nothing here is estimated: a
+    number only appears when its universe is non-empty, so an empty column reads "-- none --" rather
+    than a misleading zero.
+    """
+    s = report.get("summary") or {}
+    dod = report.get("definition_of_done") or {}
+    seams = _iter_directlake_seams(report)
+
+    # Aggregate the DirectLake remediation buckets across every seam (datasource + workbook).
+    landing = materialize = field_param = measure_bucket = review_bucket = calendar = 0
+    for _name, seam in seams:
+        landing += len(seam.get("needs_landing") or [])
+        calendar += len(seam.get("calendar_adjustments") or [])
+        for e in seam.get("stripped_calc_columns") or []:
+            buckets = (e.get("remediation") or {}).get("buckets") or {}
+            materialize += len(buckets.get("materialize_upstream") or [])
+            field_param += len(buckets.get("field_parameter") or [])
+            measure_bucket += len(buckets.get("measure_worklist") or [])
+            review_bucket += len(buckets.get("review") or [])
+
+    needs_review = _as_int(s.get("workbook_calcs_needs_review")) or sum(
+        len((wb.get("model_translation_handoff") or {}).get("needs_review") or [])
+        for wb in report.get("workbooks") or [])
+    followups = len(_dedup_followups(report))
+    card = report.get("copilot_readiness") or {}
+    copilot_items = (
+        len(card.get("guidance") or [])
+        if str(card.get("overall") or "") not in ("", "ready") else 0)
+
+    # -- Worked: translated / bound into the model --
+    worked: List[str] = []
+    if _as_int(s.get("datasources_total")) > 0:
+        worked.append(_outcome_line(
+            "%s/%s" % (_as_int(s.get("datasources_migrated")), _as_int(s.get("datasources_total"))),
+            "datasources migrated"))
+    if _as_int(s.get("measures_total")) > 0:
+        worked.append(_outcome_line(
+            "%s/%s" % (_as_int(s.get("measures_translated")), _as_int(s.get("measures_total"))),
+            "model measures translated"))
+    if _as_int(s.get("calc_columns_total")) > 0:
+        worked.append(_outcome_line(
+            "%s/%s" % (_as_int(s.get("calc_columns_translated")), _as_int(s.get("calc_columns_total"))),
+            "model calc columns translated"))
+    if _as_int(s.get("workbook_calcs_total")) > 0:
+        worked.append(_outcome_line(
+            "%s/%s" % (_as_int(s.get("workbook_calcs_translated")), _as_int(s.get("workbook_calcs_total"))),
+            "workbook calcs translated"))
+    if _as_int(s.get("visuals_rebuilt")) > 0:
+        worked.append(_outcome_line(_as_int(s.get("visuals_rebuilt")), "visuals rebuilt"))
+    if dod.get("applicable", True) and _as_int(dod.get("workbooks_total")) > 0:
+        worked.append(_outcome_line(
+            "%s/%s" % (_as_int(dod.get("reports_bound")), _as_int(dod.get("workbooks_total"))),
+            "reports rebuilt & bound"))
+
+    # -- Validate: human action to finish / verify --
+    validate: List[str] = []
+    if needs_review:
+        validate.append(_outcome_line(needs_review, "calculations need review", "needs-review"))
+    if _as_int(s.get("visuals_warned")) > 0:
+        validate.append(_outcome_line(_as_int(s.get("visuals_warned")), "visuals rebuilt with warnings"))
+    if followups:
+        validate.append(_outcome_line(followups, "manual follow-ups", "followups"))
+    if landing:
+        validate.append(_outcome_line(landing, "Delta tables to mirror / shortcut", "directlake"))
+    if materialize:
+        validate.append(_outcome_line(materialize, "columns to materialize upstream (run the SQL)", "directlake"))
+    if field_param:
+        validate.append(_outcome_line(field_param, "field / what-if parameters to model", "directlake"))
+    if measure_bucket:
+        validate.append(_outcome_line(measure_bucket, "columns to author as DAX measures", "directlake"))
+    if calendar:
+        validate.append(_outcome_line(calendar, "calendar tables rewritten (verify the date range)", "directlake"))
+    if copilot_items:
+        validate.append(_outcome_line(copilot_items, "Copilot readiness steps"))
+
+    # -- Unsupported / stubbed: inert until a human addresses it --
+    unsupported: List[str] = []
+    if _as_int(s.get("measures_stubbed")) > 0:
+        unsupported.append(_outcome_line(_as_int(s.get("measures_stubbed")), "model measures stubbed (inert placeholder)"))
+    if _as_int(s.get("calc_columns_stubbed")) > 0:
+        unsupported.append(_outcome_line(_as_int(s.get("calc_columns_stubbed")), "model calc columns stubbed"))
+    if review_bucket:
+        unsupported.append(_outcome_line(review_bucket, "DirectLake columns with no deterministic form", "directlake"))
+
+    def _col(css: str, title: str, items: List[str]) -> str:
+        body = "".join(items) if items else '<li class="none">&mdash; none &mdash;</li>'
+        return ('<div class="outcome-col %s"><div class="outcome-h">%s</div>'
+                '<ul>%s</ul></div>') % (css, title, body)
+
+    grid = (
+        _col("ok", "&#10003; Worked &mdash; in the model", worked)
+        + _col("warn", "&#9888; Validate &mdash; human action", validate)
+        + _col("bad", "&#10007; Unsupported / stubbed", unsupported)
+    )
+    return (
+        '<section class="outcome"><h2>Migration outcome</h2>'
+        '<p class="muted">One at-a-glance split of this run: what the accelerator translated into '
+        'the model, what still needs a human to validate or finish, and what it will not migrate '
+        'automatically. Every number is drawn from the detailed sections below &mdash; nothing here '
+        'is estimated.</p><div class="outcome-grid">%s</div></section>'
+    ) % grid
+
+
 def render_report_html(report: Dict[str, Any]) -> str:
     """Build the full self-contained HTML document string from a parsed ``report.json`` dict."""
     parts = [
         _render_header(report),
         _render_dod_banner(report),
+        _render_outcome_summary(report),
         _render_kpis(report),
         _render_copilot_readiness(report),
         _render_signoff_table(report),
