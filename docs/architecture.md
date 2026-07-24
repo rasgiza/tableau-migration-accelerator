@@ -9,6 +9,55 @@ Revenue-Cycle domain first**; treat those specifics as *illustrative*, not requi
 
 ---
 
+## Big picture at a glance
+
+Keep the data in place; migrate the **intelligence** as reviewable code; serve it on Fabric via
+**DirectLake**. Source-agnostic — the semantic model binds by table name, so the ingestion path
+can change without rewriting the model.
+
+```mermaid
+flowchart LR
+    subgraph SRC["1 - SOURCE (stays put)"]
+        TAB[(Tableau Server / Cloud<br/>or Desktop)]
+        WH[(Your warehouse<br/>Snowflake / Azure SQL / Databricks)]
+    end
+    subgraph ACCEL["2 - ACCELERATOR (offline, deterministic)"]
+        FILES[.twb / .twbx / .tds / .tdsx] --> PARSE[Parse + inventory]
+        PARSE --> MODEL[Typed TMDL model]
+        PARSE --> CALC[Calc -> DAX<br/>safe subset + preserved stubs]
+        PARSE --> VIZ[Report pages / visuals]
+        MODEL --> PBIP[.pbip project in Git]
+        CALC --> PBIP
+        VIZ --> PBIP
+    end
+    subgraph GATES["Human gates (never guessed)"]
+        LOD[Complex LOD / table calcs]
+        REL[Relationship review]
+        STORE[Storage mode: Import vs DirectLake]
+    end
+    subgraph FABRIC["3 - FABRIC target (F-SKU workspace)"]
+        OL[(OneLake Delta<br/>Mirroring / Shortcut)]
+        SM[Semantic model<br/>DirectLake]
+        RPT[Power BI reports]
+        COP["Copilot / Q&A"]
+        USERS[Business users]
+    end
+    TAB --> FILES
+    WH -. Mirror/Shortcut .-> OL
+    PBIP -->|Fabric REST CI/CD| SM
+    OL -->|bind by table name| SM
+    SM --> RPT --> USERS
+    SM --> COP
+    CALC -.review.-> LOD
+    MODEL -.review.-> REL
+    PBIP -.decide.-> STORE
+```
+
+The rest of this doc unpacks each layer: the **design principles**, the **two migration
+motions**, the **target-state** detail, and the **phased rollout**.
+
+---
+
 ## Design principles
 
 1. **Your warehouse stays the source of truth.** No data fork. Fabric reads it via
