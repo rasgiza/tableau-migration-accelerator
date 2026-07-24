@@ -121,6 +121,8 @@ cd tableau-migration-accelerator
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 
 # 3 · Convert the bundled sample — offline, one command
+#    (Superstore.twb ships with the repo; it's just a test file to prove the tool works.
+#     Your own / customer workbooks go in the workbooks/ folder — see "Convert your own" below.)
 .\scripts\Convert-TableauToPowerBI.ps1 -Source .\sample\Superstore.twb -Output .\out
 ```
 
@@ -134,8 +136,10 @@ as annotations), an openable **`.pbip`**, and a `report.json` + `summary.md`.
 > that call, then finishing the flagged 20%, is [Stage 2–3](#the-journey-at-a-glance). Correct-or-
 > abstain is the whole point: the tool never silently ships a model it can't stand behind.
 
-**Convert your own workbooks.** After cloning, the repo has a ready-made **`workbooks/`**
-folder — drop your `.twb` / `.twbx` / `.tds` / `.tdsx` there (a single file or many), then:
+**Convert your own workbooks.** Step 3 above used the bundled `sample/` file only to prove the
+tool runs. For **real work** — workbooks you download from Tableau Online, or a customer's own
+exports — use the ready-made **`workbooks/`** folder: drop your `.twb` / `.twbx` / `.tds` /
+`.tdsx` there (a single file or many), then:
 
 ```powershell
 .\scripts\Convert-TableauToPowerBI.ps1 -Source .\workbooks -Output .\out
