@@ -4022,6 +4022,14 @@ def main(argv=None):
     parser.add_argument("--directlake-schema", metavar="NAME", default="dbo",
                         help="Lakehouse schema for the DirectLake seam (default: dbo). Pass an empty "
                              "string for a classic non-schema lakehouse.")
+    parser.add_argument("--rebind-materialized", action="store_true",
+                        help="OPT-IN post-materialization rebind: bind each DirectLake table whose "
+                             "row-level calculated columns were faithfully translated to its "
+                             "<table>_enriched superset and re-declare those columns as physical, so "
+                             "Direct Lake reads them natively (recovering the visuals that referenced "
+                             "them). Run ONLY after executing the generated directlake-materialization"
+                             ".sql in the Lakehouse -- otherwise the model binds to a table that does "
+                             "not exist yet. Off by default (ships bound to the raw Delta tables).")
     args = parser.parse_args(argv)
 
     # Preflight: fail loudly and EARLY on the two things a tester most often gets wrong -- an old
@@ -4054,7 +4062,7 @@ def main(argv=None):
     # every emitted extract-backed model (workbook rebuild, standalone-datasource pass, published
     # match, rebind resolver) shares the same real OneLake 'Tables' URL. When --directlake-url is
     # omitted the placeholder is emitted (byte-identical to before this flag existed).
-    configure_directlake_seam(args.directlake_url, args.directlake_schema)
+    configure_directlake_seam(args.directlake_url, args.directlake_schema, args.rebind_materialized)
 
     # No Tableau assets in scope -> stop with an actionable message instead of emitting an empty
     # bundle (or an empty scan) that looks like a successful no-op.

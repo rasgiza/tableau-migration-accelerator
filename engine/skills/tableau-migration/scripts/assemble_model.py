@@ -3180,20 +3180,27 @@ DIRECTLAKE_SEAM_URL_PLACEHOLDER = (
 # the placeholder above is emitted. ``schema`` follows the same precedence (default ``"dbo"``).
 _DIRECTLAKE_SEAM_URL = None
 _DIRECTLAKE_SEAM_SCHEMA = "dbo"
+_DIRECTLAKE_SEAM_REBIND = False
 
 
-def configure_directlake_seam(url, schema="dbo"):
+def configure_directlake_seam(url, schema="dbo", rebind_materialized=False):
     """Set (or clear, with ``url=None``) the process-wide extract-backed DirectLake seam target.
 
     Estate-run configuration, not per-call state: the CLI calls this ONCE before a run so every
-    emitted extract-backed model binds to the same real OneLake ``Tables`` URL. Returns the previous
-    ``(url, schema)`` so a caller (or a test) can restore it. An explicit ``directlake_url=`` passed to
-    :func:`migrate_datasource` still overrides this for an individual datasource.
+    emitted extract-backed model binds to the same real OneLake ``Tables`` URL. ``rebind_materialized``
+    is the opt-in post-materialisation switch (see
+    :func:`convert_import_parts_to_directlake_seam`) -- when ``True`` every rebound table whose
+    row-level calc columns were faithfully translated binds to its ``<delta>_enriched`` superset and
+    re-declares those columns as physical. Returns the previous
+    ``(url, schema, rebind_materialized)`` so a caller (or a test) can restore it. An explicit
+    ``directlake_url=`` / ``directlake_rebind_materialized=`` passed to :func:`migrate_datasource`
+    still overrides this for an individual datasource.
     """
-    global _DIRECTLAKE_SEAM_URL, _DIRECTLAKE_SEAM_SCHEMA
-    prev = (_DIRECTLAKE_SEAM_URL, _DIRECTLAKE_SEAM_SCHEMA)
+    global _DIRECTLAKE_SEAM_URL, _DIRECTLAKE_SEAM_SCHEMA, _DIRECTLAKE_SEAM_REBIND
+    prev = (_DIRECTLAKE_SEAM_URL, _DIRECTLAKE_SEAM_SCHEMA, _DIRECTLAKE_SEAM_REBIND)
     _DIRECTLAKE_SEAM_URL = url or None
     _DIRECTLAKE_SEAM_SCHEMA = "dbo" if schema is None else schema
+    _DIRECTLAKE_SEAM_REBIND = bool(rebind_materialized)
     return prev
 
 # A table's TABLE-LEVEL Power Query partition header (``\tpartition <name> = m``). Only these base
@@ -3249,6 +3256,43 @@ def _physical_column_map(body):
             current = None
     return mapping
 
+
+def _materialized_physical_column_tmdl(name, props):
+    """Re-emit a materialised calc column as a Direct Lake ``sourceColumn``-backed physical column.
+
+    On an opt-in post-materialisation rebind the ``materialize_upstream`` DAX has been baked into a
+    ``<table>_enriched`` Delta column, so the column now exists physically. It is re-declared as a
+    plain physical column -- its captured ``dataType`` / ``formatString`` / ``summarizeBy`` /
+    annotations preserved from the original calc column -- that Direct Lake reads natively. The
+    enriched Delta column name equals the DAX column name, so ``sourceColumn`` = ``name``.
+    """
+    lines = [f"\tcolumn {T.q(name)}"]
+    for p in props or []:
+        if _TMDL_SOURCE_COLUMN_RE.match(p):
+            continue  # a calc column carries none; guard against re-adding a stray sourceColumn
+        lines.append(p)
+    lines.append(f"\t\tsourceColumn: {T._source_column_value(name)}")
+    return "\n".join(lines)
+
+
+def _inject_physical_columns(body, blocks):
+    """Insert re-materialised physical-column blocks into a table body.
+
+    ``body`` opens with a newline and ends before the trailing ``partition`` line (ending in a single
+    newline). Columns are placed before the first ``hierarchy`` (TMDL emits columns then hierarchies)
+    when one exists, else appended after the last member -- either way each re-declared column is a
+    valid top-level table member and the caller's blank-line-before-partition reconstruction holds.
+    """
+    if not blocks:
+        return body
+    payload = "\n" + "\n".join(blocks)
+    h = body.find("\n\thierarchy ")
+    if h != -1:
+        return body[:h] + payload + body[h:]
+    if body.endswith("\n"):
+        return body[:-1] + payload + "\n"
+    return body + payload + "\n"
+
 # CALENDARAUTO() builds its date range by implicitly scanning EVERY date column in the model --
 # including columns on DirectLake tables. That makes the calculated Date table a "calculated table
 # referring to a Direct Lake data source", which the engine refuses to refresh. On the DirectLake
@@ -3289,15 +3333,18 @@ def _neutralize_calendarauto_in_parts(parts, *, min_year, max_year):
 
 
 def _strip_calc_columns_from_body(body):
-    """Remove calculated-column blocks from a table body, returning ``(clean_body, [{name, dax}])``.
+    """Remove calc-column blocks from a table body, returning ``(clean_body, [{name, dax, props}])``.
 
     Direct Lake tables physically read Delta columns and CANNOT carry calculated columns (the AS
     engine rejects them at import: "Standard expression context may not be used for calculated
     columns in Direct Lake tables"). When a base table is rebound onto a DirectLake entity partition
     its calculated columns must therefore be dropped -- the caller surfaces each dropped column's
-    NAME and its translated DAX EXPRESSION so a downstream router can decide the correct remediation
-    (materialize upstream / field parameter / measure worklist) instead of a blanket "dropped".
-    Physical (``sourceColumn``-backed) columns and hierarchies are preserved byte-for-byte.
+    NAME, its translated DAX EXPRESSION, and the raw property lines (``dataType`` / ``formatString`` /
+    ``summarizeBy`` / annotations) so a downstream router can decide the correct remediation
+    (materialize upstream / field parameter / measure worklist) instead of a blanket "dropped". The
+    captured ``props`` let an opt-in post-materialisation rebind re-declare a materialised column as a
+    faithful physical column. Physical (``sourceColumn``-backed) columns and hierarchies are
+    preserved byte-for-byte.
 
     ``body`` is the text between the ``table`` header and the trailing ``partition`` line (it opens
     with a newline). Boundaries are detected structurally on single-tab-indented members, so a
@@ -3314,7 +3361,7 @@ def _strip_calc_columns_from_body(body):
             name = m.group(1) or m.group(2)
             header = lines[i]
             # DAX starts after the '=' on the header line; a property line ends the expression.
-            expr_parts, in_expr = [], True
+            expr_parts, prop_lines, in_expr = [], [], True
             after_eq = header.split("=", 1)[1].strip() if "=" in header else ""
             if after_eq:
                 expr_parts.append(after_eq)
@@ -3322,10 +3369,16 @@ def _strip_calc_columns_from_body(body):
             while i < n and not _TMDL_TOPLEVEL_MEMBER_RE.match(lines[i]):
                 if in_expr and _TMDL_PROPERTY_LINE_RE.match(lines[i]):
                     in_expr = False  # remaining lines are properties, not expression
+                    prop_lines.append(lines[i])
                 elif in_expr and lines[i].strip():
                     expr_parts.append(lines[i].strip())
+                else:  # property / annotation / blank line belonging to this calc column
+                    prop_lines.append(lines[i])
                 i += 1  # skip the calc column's (possibly multi-line) body
-            stripped.append({"name": name, "dax": " ".join(expr_parts).strip()})
+            while prop_lines and not prop_lines[-1].strip():
+                prop_lines.pop()  # drop the trailing blank separating this column from the next member
+            stripped.append({"name": name, "dax": " ".join(expr_parts).strip(),
+                             "props": prop_lines})
             continue
         kept.append(lines[i])
         i += 1
@@ -3437,7 +3490,8 @@ def _all_calc_column_defs(parts):
 
 
 def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlake_url,
-                                            delta_name_of=None, schema_name="dbo"):
+                                            delta_name_of=None, schema_name="dbo",
+                                            rebind_materialized=False):
     """Rebind an ``assemble_import_model`` parts dict onto a DirectLake-over-OneLake seam.
 
     The Import build already produced the FULL model -- typed columns, translated ``_Measures``,
@@ -3459,14 +3513,25 @@ def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlak
     the target lakehouse schema (default ``"dbo"``; pass ``None``/``""`` for a classic non-schema
     lakehouse, matching ``generate_table_tmdl``).
 
+    ``rebind_materialized`` is the OPT-IN post-materialisation switch: when ``True`` a table whose
+    ``materialize_upstream`` columns were faithfully translated is bound to its ``<delta>_enriched``
+    Delta table (a strict ``SELECT *`` superset the customer produces by running the generated
+    materialisation SQL) and those covered columns are re-declared as physical ``sourceColumn``-backed
+    columns Direct Lake reads natively -- recovering the visuals that referenced them. It defaults to
+    ``False`` because ``<delta>_enriched`` does not exist until the customer runs that SQL, so the
+    migration itself never ships a model bound to a table that isn't there yet.
+
     Returns ``(new_parts, landed, stripped, calendar_adjustments)`` where ``landed`` is
     ``[{"table", "delta_name"}]`` for each rebound base table -- the landing manifest the caller
-    surfaces so a customer / pipeline knows exactly which Delta tables to mirror -- ``stripped`` is
-    ``[{"table", "columns": [...], "remediation": {...}}]`` naming any calculated columns removed from
-    a rebound table (Direct Lake tables cannot carry calculated columns) plus a per-column remediation
-    plan from :func:`directlake_remediation.classify_stripped_columns` (materialize upstream / field
-    parameter / measure worklist / review), and ``calendar_adjustments`` is ``[{"table", "from", "to"}]``
-    naming
+    surfaces so a customer / pipeline knows exactly which Delta tables to mirror; a table rebound to
+    its enriched superset additionally carries ``"entity"`` (the ``<delta>_enriched`` name it binds
+    to) and ``"materialized_columns"`` (the re-declared physical column names) -- ``stripped`` is
+    ``[{"table", "columns": [...], "remediation": {...}, "materialization": {...}}]`` naming any
+    calculated columns removed from a rebound table (Direct Lake tables cannot carry calculated
+    columns) plus a per-column remediation plan from
+    :func:`directlake_remediation.classify_stripped_columns` (materialize upstream / field
+    parameter / measure worklist / review) and the generated upstream materialization SQL, and
+    ``calendar_adjustments`` is ``[{"table", "from", "to"}]`` naming
     any calculated table whose ``CALENDARAUTO()`` was rewritten to a bounded ``CALENDAR()`` (that
     function implicitly scans DirectLake date columns, which the engine rejects). When NOTHING is
     rebindable (no ``= m`` base table) the original parts are returned unchanged with empty manifests.
@@ -3500,6 +3565,9 @@ def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlak
         # translated DAX) so the rebound entity table saves; the caller surfaces them for remediation
         # routing (materialize upstream / field parameter / measure worklist).
         body, stripped_cols = _strip_calc_columns_from_body(body)
+        delta = delta_name_of(disp)
+        materialization = None
+        materialized_cols = []  # covered columns re-declared as physical columns on an opt-in rebind
         if stripped_cols:
             rem = classify_stripped_columns(stripped_cols)
             # For the row-level columns routed to materialize-upstream, generate the Lakehouse
@@ -3511,21 +3579,35 @@ def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlak
                 "rels": [r for r in _relationships if r.get("from_table") == disp],
                 "coldefs": _coldefs_all,
             }
+            # The enriched Delta table + its columns are named after the LANDED delta table -- what the
+            # customer mirrors and runs the materialisation SQL against -- not the display name.
             materialization = build_table_view(
-                disp, mat_cols, _physical_column_map(body), schema=schema, related=related_ctx)
+                delta, mat_cols, _physical_column_map(body), schema=schema, related=related_ctx)
             stripped.append({
                 "table": disp,
                 "columns": [c["name"] for c in stripped_cols],
                 "remediation": rem,
                 "materialization": materialization,
             })
-        delta = delta_name_of(disp)
-        src_lineage = f"[{schema}].[{delta}]" if schema else f"[{delta}]"
+            # Opt-in post-materialisation rebind: the covered columns now exist physically in the
+            # enriched Delta table, so re-declare them as physical columns Direct Lake reads natively.
+            if rebind_materialized and materialization.get("view"):
+                covered = {r["name"] for r in materialization.get("columns", []) if r.get("ok")}
+                inject = [c for c in mat_cols if c["name"] in covered]
+                if inject:
+                    body = _inject_physical_columns(
+                        body, [_materialized_physical_column_tmdl(c["name"], c.get("props"))
+                               for c in inject])
+                    materialized_cols = [c["name"] for c in inject]
+        # Bind to the enriched Delta table (SELECT * plus the materialised columns -- a strict
+        # superset) only when the opt-in rebind actually re-declared columns; otherwise the raw table.
+        bind = f"{delta}_enriched" if materialized_cols else delta
+        src_lineage = f"[{schema}].[{bind}]" if schema else f"[{bind}]"
         entity = (
-            f"\tpartition {delta} = entity\n"
+            f"\tpartition {bind} = entity\n"
             f"\t\tmode: directLake\n"
             f"\t\tsource\n"
-            f"\t\t\tentityName: {delta}\n"
+            f"\t\t\tentityName: {bind}\n"
             f"{schema_line}"
             f"\t\t\texpressionSource: {T.q(expression_name)}\n\n"
         )
@@ -3536,7 +3618,11 @@ def convert_import_parts_to_directlake_seam(parts, *, expression_name, directlak
             f"{body}\n"
             f"{entity}"
         )
-        landed.append({"table": disp, "delta_name": delta})
+        entry = {"table": disp, "delta_name": delta}
+        if materialized_cols:
+            entry["entity"] = bind
+            entry["materialized_columns"] = materialized_cols
+        landed.append(entry)
     if not landed:
         return dict(parts), [], [], []
     new_parts["definition/expressions.tmdl"] = T.generate_expressions_tmdl(
@@ -4366,7 +4452,8 @@ def migrate_datasource(source, *, model_name, write_to=None, as_pbip=False, data
                        descriptor=None,
                        calcs=None, dim_calcs=None, approved_calc_dax=None, date_range=None,
                        local_data=None, packaged_source=None, flatfile_dest_dir=None,
-                       directlake_url=None, directlake_schema=None, **kwargs):
+                       directlake_url=None, directlake_schema=None,
+                       directlake_rebind_materialized=None, **kwargs):
     """**One call** from a downloaded datasource to everything needed to land it in Fabric.
 
     ``source`` may be a path to a ``.tdsx``/``.tds``/``.twbx``/``.twb``, raw bytes, or XML text.
@@ -4540,9 +4627,11 @@ def migrate_datasource(source, *, model_name, write_to=None, as_pbip=False, data
         # Precedence: explicit arg > process-wide estate target (configure_directlake_seam) > placeholder.
         _seam_url = directlake_url or _DIRECTLAKE_SEAM_URL or DIRECTLAKE_SEAM_URL_PLACEHOLDER
         _seam_schema = directlake_schema if directlake_schema is not None else _DIRECTLAKE_SEAM_SCHEMA
+        _seam_rebind = (directlake_rebind_materialized if directlake_rebind_materialized is not None
+                        else _DIRECTLAKE_SEAM_REBIND)
         _seam_parts, _landed, _stripped, _calendar = convert_import_parts_to_directlake_seam(
             result["parts"], expression_name=_seam_expr, directlake_url=_seam_url,
-            schema_name=_seam_schema)
+            schema_name=_seam_schema, rebind_materialized=bool(_seam_rebind))
         if _landed:
             result["parts"] = _seam_parts
             _rep = result.setdefault("report", {})
@@ -4556,6 +4645,11 @@ def migrate_datasource(source, *, model_name, write_to=None, as_pbip=False, data
                 "directlake_url": _seam_url,
                 "schema": (_seam_schema or "") or None,
                 "url_is_placeholder": _seam_url == DIRECTLAKE_SEAM_URL_PLACEHOLDER,
+                # Opt-in post-materialisation rebind: when true, tables whose row-level calc columns
+                # were faithfully translated bind to their <delta>_enriched superset and re-declare
+                # those columns as physical (see the "entity"/"materialized_columns" keys in
+                # needs_landing). False = the default deterministic ship, bound to the raw tables.
+                "rebind_materialized": bool(_seam_rebind),
                 "needs_landing": _landed,
                 # Calc columns dropped from the rebound DirectLake tables (unsupported there) --
                 # the customer converts these to measures or materialises them upstream in the

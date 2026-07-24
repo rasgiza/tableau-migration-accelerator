@@ -274,18 +274,18 @@ def test_converter_strips_calc_columns_from_directlake_table():
     assert "partition Orders = entity" in orders and "mode: directLake" in orders
 
 
-def test_converter_inlines_related_date_parts_into_materialization():
-    # A source calc column that pulls a date part from the related Date dimension must be
-    # materialized by INLINING the dimension's own definition with the FK substituted -- NOT by a
-    # join (the Date table is calculated, with no Delta table to join to). The 'Month No' def
-    # carries a valueless `isHidden` property, which must not be swallowed into the captured DAX.
+def _orders_date_related_parts():
+    # Orders pulls two date parts from the related (calculated) Date dimension via RELATED(); the
+    # 'Month No' dimension def carries a valueless `isHidden` property. Shared by the RELATED-inlining
+    # and post-materialization rebind tests.
     orders = (
         "table Orders\n"
         "\tcolumn Order_Date\n"
         "\t\tdataType: dateTime\n"
         "\t\tsourceColumn: \"Order Date\"\n\n"
         "\tcolumn Year = RELATED('Date'[Year])\n"
-        "\t\tdataType: int64\n\n"
+        "\t\tdataType: int64\n"
+        "\t\tsummarizeBy: none\n\n"
         "\tcolumn Month = RELATED('Date'[Month No])\n"
         "\t\tdataType: int64\n\n"
         "\tpartition Orders = m\n"
@@ -317,13 +317,21 @@ def test_converter_inlines_related_date_parts_into_materialization():
         "\tfromColumn: Orders.Ship_Date\n"
         "\ttoColumn: Date.Date\n"
     )
-    parts = {
+    return {
         "definition/tables/Orders.tmdl": orders,
         "definition/tables/Date.tmdl": date,
         "definition/relationships.tmdl": rels,
         "definition/model.tmdl": "model Model\nref table Orders\nref table Date\n",
         "definition/expressions.tmdl": "expression X = 1\n",
     }
+
+
+def test_converter_inlines_related_date_parts_into_materialization():
+    # A source calc column that pulls a date part from the related Date dimension must be
+    # materialized by INLINING the dimension's own definition with the FK substituted -- NOT by a
+    # join (the Date table is calculated, with no Delta table to join to). The 'Month No' def
+    # carries a valueless `isHidden` property, which must not be swallowed into the captured DAX.
+    parts = _orders_date_related_parts()
     _, landed, stripped, _ = convert_import_parts_to_directlake_seam(
         parts, expression_name="DL", directlake_url="https://onelake/Tables", schema_name="dbo")
     assert landed == [{"table": "Orders", "delta_name": "Orders"}]
@@ -332,6 +340,66 @@ def test_converter_inlines_related_date_parts_into_materialization():
     assert mat["covered"] == 2 and mat["needs_manual"] == 0
     assert "YEAR(`Order Date`) AS `Year`" in mat["sql"]
     assert "MONTH(`Order Date`) AS `Month`" in mat["sql"]
+
+
+def test_rebind_off_by_default_binds_raw_table():
+    # Without the opt-in, the model ships bound to the RAW Delta table (the enriched superset does
+    # not exist until the customer runs the materialization SQL) and the calc columns stay stripped.
+    parts = _orders_date_related_parts()
+    new_parts, landed, _, _ = convert_import_parts_to_directlake_seam(
+        parts, expression_name="DL", directlake_url="https://onelake/Tables", schema_name="dbo")
+    orders = new_parts["definition/tables/Orders.tmdl"]
+    assert "partition Orders = entity" in orders and "entityName: Orders\n" in orders
+    assert "sourceLineageTag: [dbo].[Orders]" in orders
+    assert "_enriched" not in orders
+    # the materialized columns are NOT re-declared (they don't exist physically yet)
+    assert "column Year" not in orders and "column Month" not in orders
+    assert landed == [{"table": "Orders", "delta_name": "Orders"}]
+
+
+def test_rebind_materialized_binds_enriched_and_redeclares_columns():
+    # OPT-IN: once the customer has produced <table>_enriched, the rebind binds to that superset and
+    # re-declares the covered columns as PHYSICAL (sourceColumn-backed) so Direct Lake reads them.
+    parts = _orders_date_related_parts()
+    new_parts, landed, stripped, _ = convert_import_parts_to_directlake_seam(
+        parts, expression_name="DL", directlake_url="https://onelake/Tables", schema_name="dbo",
+        rebind_materialized=True)
+    orders = new_parts["definition/tables/Orders.tmdl"]
+    # bound to the enriched superset
+    assert "partition Orders_enriched = entity" in orders
+    assert "entityName: Orders_enriched\n" in orders
+    assert "sourceLineageTag: [dbo].[Orders_enriched]" in orders
+    # covered date parts re-declared as physical columns (no '=' DAX; sourceColumn = the enriched col)
+    assert "\tcolumn Year\n" in orders and "sourceColumn: Year" in orders
+    assert "\tcolumn Month\n" in orders and "sourceColumn: Month" in orders
+    assert "RELATED(" not in orders  # the DAX is gone -- the value is now a physical column
+    # preserved captured property from the original calc column
+    assert "summarizeBy: none" in orders
+    # the physical Order_Date column is untouched
+    assert 'sourceColumn: "Order Date"' in orders
+    # landing manifest records the enriched entity + which columns were re-materialized
+    assert landed == [{
+        "table": "Orders", "delta_name": "Orders",
+        "entity": "Orders_enriched", "materialized_columns": ["Year", "Month"],
+    }]
+    # the materialization SQL is still emitted for the customer to run first
+    assert stripped[0]["materialization"]["covered"] == 2
+
+
+def test_configure_seam_rebind_flag_round_trips():
+    prev = configure_directlake_seam("https://onelake/ws/lh/Tables", schema="dbo",
+                                     rebind_materialized=True)
+    try:
+        # process-wide flag flows through migrate_datasource with no explicit arg
+        new_parts, landed, _, _ = convert_import_parts_to_directlake_seam(
+            _orders_date_related_parts(), expression_name="DL",
+            directlake_url="https://onelake/Tables", schema_name="dbo",
+            rebind_materialized=True)
+        assert landed[0].get("entity") == "Orders_enriched"
+    finally:
+        # prev is a 3-tuple (url, schema, rebind) -- restores cleanly
+        assert len(prev) == 3
+        configure_directlake_seam(*prev)
 
 
 def test_converter_no_m_partition_is_noop():
