@@ -19,6 +19,7 @@ proves that with a real offline run.
 A map of this README and the deep-dive docs, so anyone can jump straight to what they need.
 
 **Start here**
+- [Quick start (working result in ~60 seconds)](#quick-start-get-a-working-result-in-60-seconds)
 - [The journey at a glance](#the-journey-at-a-glance) — the 3 stages, one table
 - [Clone-to-completion in 5 steps](#clone-to-completion-in-5-steps) — fresh clone → openable model
 - [Step 0 — Get your Tableau files out](#step-0--get-your-tableau-files-out-and-staging-a-large-estate)
@@ -42,6 +43,52 @@ A map of this README and the deep-dive docs, so anyone can jump straight to what
 - [Customer response](docs/customer-response.md) · [Architecture](docs/architecture.md) · [Real-source binding runbook](docs/real-source-binding-runbook.md)
 - [Assessment methodology](docs/assessment-methodology.md) · [Competitive analysis](docs/competitive-analysis.md)
 - [DirectLake & mirroring flow](docs/directlake-mirroring-flow.md) · [Semantic-model best practices](docs/semantic-model-best-practices.md)
+
+## Quick start (get a working result in ~60 seconds)
+
+**The only prerequisite is Python 3.11+** on your PATH — nothing else for the offline core
+(no `pip install`, no internet, no Azure). Check it with `py -3.11 --version` (Windows) or
+`python3 --version`. On **macOS/Linux**, install **PowerShell 7** to use the wrapper, or run the
+engine directly (last block below).
+
+```powershell
+# 1 · Clone and enter the repo
+git clone https://github.com/rasgiza/tableau-migration-accelerator.git
+cd tableau-migration-accelerator
+
+# 2 · (Windows, once per session) allow the local script to run
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+
+# 3 · Convert the bundled sample — offline, one command
+.\scripts\Convert-TableauToPowerBI.ps1 -Source .\sample\Superstore.twb -Output .\out
+```
+
+**What you get** in `.\out`: a typed **TMDL** semantic model, safe calc→**DAX** (originals kept
+as annotations), an openable **`.pbip`**, and a `report.json` + `summary.md`.
+**Open it:** double-click `out\pbip\Superstore\Superstore.pbip` in **Power BI Desktop**.
+
+> **Heads-up — the sample ends with `[FAIL] Definition of done` on purpose.** That is *not* a
+> bug: everything mechanical (schema, types, calc→DAX, PBIP) is done, and the run stops at the
+> one thing it refuses to guess — the **storage-mode decision** (Import vs. DirectLake). Making
+> that call, then finishing the flagged 20%, is [Stage 2–3](#the-journey-at-a-glance). Correct-or-
+> abstain is the whole point: the tool never silently ships a model it can't stand behind.
+
+**Convert your own workbook, or a whole folder of exports:**
+
+```powershell
+.\scripts\Convert-TableauToPowerBI.ps1 -Source C:\exports\MyDashboard.twbx
+.\scripts\Convert-TableauToPowerBI.ps1 -Source C:\exports\all-workbooks -Output C:\out
+```
+
+**No PowerShell (macOS/Linux, or CI)?** Call the engine directly — same result, no wrapper.
+Point `-i` at a file *or* a folder; `-o` is the output bundle:
+
+```bash
+python3 engine/skills/tableau-migration/scripts/migrate_estate.py -i ./sample -o ./out
+```
+
+That's the whole offline loop. For bulk-exporting a real estate, publishing to Fabric, and the
+full walkthrough, keep reading.
 
 ## The journey at a glance
 
