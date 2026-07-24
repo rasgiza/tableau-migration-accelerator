@@ -3679,3 +3679,38 @@ def test_rebuild_from_published_match_calc_union_fail_closed(monkeypatch):
     assert res is not None
     names = [c.get("name") for c in (captured.get("calcs") or [])]
     assert names == ["WB Calc"]    # exactly the workbook's own calc, unchanged
+
+
+# -- legacy .tde archive detection (needs-storage-decision message clarity) ----
+def _write_zip(path, members):
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return str(path)
+
+
+def test_archive_bundles_legacy_tde_true_for_tde_only(tmp_path):
+    # A .twbx whose only bundled extract is a legacy .tde (no .hyper) -> unreadable schema.
+    p = _write_zip(tmp_path / "legacy.twbx",
+                   {"Book.twb": "<workbook/>", "Data/extract.tde": b"\x00tde"})
+    assert me._archive_bundles_legacy_tde(p) is True
+
+
+def test_archive_bundles_legacy_tde_false_when_hyper_present(tmp_path):
+    # A .hyper alongside (or instead of) a .tde is readable -> not the legacy-.tde case.
+    both = _write_zip(tmp_path / "both.twbx",
+                      {"Book.twb": "<workbook/>", "Data/x.tde": b"t", "Data/x.hyper": b"h"})
+    hyper_only = _write_zip(tmp_path / "hyper.twbx",
+                            {"Book.twb": "<workbook/>", "Data/x.hyper": b"h"})
+    assert me._archive_bundles_legacy_tde(both) is False
+    assert me._archive_bundles_legacy_tde(hyper_only) is False
+
+
+def test_archive_bundles_legacy_tde_fail_closed(tmp_path):
+    # Fail-closed: a live-source LUID (not a path), a missing file, and a non-zip all yield False.
+    assert me._archive_bundles_legacy_tde("a1b2c3d4-0000-luid") is False
+    assert me._archive_bundles_legacy_tde(str(tmp_path / "nope.twbx")) is False
+    assert me._archive_bundles_legacy_tde(None) is False
+    plain = tmp_path / "bare.twb"
+    plain.write_text("<workbook/>", encoding="utf-8")
+    assert me._archive_bundles_legacy_tde(str(plain)) is False
