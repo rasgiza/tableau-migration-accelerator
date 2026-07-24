@@ -384,3 +384,85 @@ def test_needs_review_formula_is_html_escaped():
     h = mr.render_report_html(_minimal_report(workbooks=[wb]))
     assert "<b>x</b>" not in h
     assert "&lt;b&gt;x&lt;/b&gt;" in h
+
+
+def _outcome_html(h):
+    """Slice out just the top-of-report 'Migration outcome' section so assertions can't be satisfied
+    by an identical number appearing in a different section (e.g. the Coverage KPIs)."""
+    start = h.index('<section class="outcome">')
+    end = h.index("</section>", start) + len("</section>")
+    return h[start:end]
+
+
+def test_outcome_summary_present_and_bucketed():
+    # The consolidated tri-panel splits the run into worked / validate / unsupported, drawing every
+    # number straight from the report so a customer sees what they own at a glance.
+    h = mr.render_report_html(_minimal_report())
+    assert "Migration outcome" in h
+    o = _outcome_html(h)
+    assert "Worked" in o and "Validate" in o and "Unsupported" in o
+    # worked -- translated / bound into the model
+    assert "9/17" in o and "model measures translated" in o
+    assert "2/4" in o and "model calc columns translated" in o
+    assert "19/67" in o and "workbook calcs translated" in o
+    assert "2/2" in o and "datasources migrated" in o
+    assert "2/7" in o and "reports rebuilt" in o
+    # validate -- human action
+    assert "48" in o and "calculations need review" in o
+    assert "manual follow-ups" in o
+    # unsupported / stubbed
+    assert "model measures stubbed" in o
+    assert "model calc columns stubbed" in o
+
+
+def test_outcome_summary_links_to_detail_sections():
+    # The counts hyperlink down to the sections that itemise them, and those sections carry the
+    # matching anchor ids.
+    h = mr.render_report_html(_minimal_report(workbooks=[_needs_review_workbook()]))
+    o = _outcome_html(h)
+    assert 'href="#needs-review"' in o
+    assert 'href="#followups"' in o
+    assert 'id="needs-review"' in h
+    assert 'id="followups"' in h
+
+
+def test_outcome_summary_counts_directlake_buckets():
+    # DirectLake landing, remediation buckets and calendar rewrites are aggregated across the seam
+    # into the validate column; the un-remediable 'review' bucket lands under unsupported.
+    rpt = _directlake_seam_report()
+    rpt["datasources"][0]["directlake_seam"]["stripped_calc_columns"] = [
+        {"table": "Orders", "columns": ["A", "B", "C", "D"],
+         "remediation": {"buckets": {
+             "materialize_upstream": [{"name": "A"}],
+             "field_parameter": [{"name": "B"}],
+             "measure_worklist": [{"name": "C"}],
+             "review": [{"name": "D"}],
+         }}},
+    ]
+    h = mr.render_report_html(rpt)
+    o = _outcome_html(h)
+    assert "Delta tables to mirror" in o           # needs_landing (Orders, People)
+    assert "columns to materialize upstream" in o
+    assert "field / what-if parameters" in o
+    assert "columns to author as DAX measures" in o
+    assert "calendar tables rewritten" in o        # calendar_adjustments
+    assert 'href="#directlake"' in o
+    assert "no deterministic form" in o            # the review bucket -> unsupported
+    assert 'id="directlake"' in h
+
+
+def test_outcome_summary_empty_report_shows_none():
+    # An empty report has nothing in any bucket; every column must read '-- none --', never a
+    # misleading zero.
+    h = mr.render_report_html({})
+    assert "Migration outcome" in h
+    o = _outcome_html(h)
+    assert "&mdash; none &mdash;" in o
+
+
+def test_outcome_summary_ampersand_not_double_escaped():
+    # Labels with a literal '&' are escaped exactly once ('&amp;'), never double-escaped.
+    h = mr.render_report_html(_minimal_report())
+    o = _outcome_html(h)
+    assert "reports rebuilt &amp; bound" in o
+    assert "&amp;amp;" not in o
