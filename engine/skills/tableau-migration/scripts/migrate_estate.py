@@ -2162,6 +2162,29 @@ def _twbx_images(wb_id):
         return {}
 
 
+def _archive_bundles_legacy_tde(wb_id):
+    """True when ``wb_id`` is a ``.twbx``/``.tdsx`` zip that bundles a LEGACY ``.tde`` extract and no
+    readable ``.hyper``.
+
+    A ``.tde`` is Tableau's pre-10.5 (2018) Data Engine extract; no library -- including the Tableau
+    Hyper API -- can read it, so a workbook whose only schema source is a bundled ``.tde`` cannot be
+    typed and routes to the needs-storage-decision fallback. Detecting it lets that abstain name the
+    specific, actionable cause instead of a generic "no columns". Fail-closed: a live-source LUID (not
+    a path), a bare ``.twb``, a non-zip, or an archive that also carries a ``.hyper`` all yield
+    ``False``. Never raises.
+    """
+    import zipfile
+    try:
+        if not (isinstance(wb_id, str) and os.path.isfile(wb_id)) or not zipfile.is_zipfile(wb_id):
+            return False
+        with zipfile.ZipFile(wb_id) as zf:
+            names = [n.lower() for n in zf.namelist()]
+        return (any(n.endswith(".tde") for n in names)
+                and not any(n.endswith(".hyper") for n in names))
+    except Exception:
+        return False
+
+
 def _build_datasource_pbip(entry, wb_detail, twb_text, result, ds, *, label, model_safe, dest,
                            folder_rel, report_base, viz_name, viz=None, ds_catalog=None,
                            approved_calc_dax=None, wb_id=None, pbip_dir=None,
@@ -2282,8 +2305,13 @@ def _build_datasource_pbip(entry, wb_detail, twb_text, result, ds, *, label, mod
                 res_report = res.get("report") or {}
         if res_report.get("fallback"):
             rationale = (res_report.get("storage_decision") or {}).get("rationale") or "undoable shape"
+            tde_note = (
+                " -- the bundled extract is a legacy .tde (Tableau < 10.5) whose schema cannot be "
+                "read; re-save the workbook in a current Tableau version to embed a .hyper, or supply "
+                "a live connection"
+                if _archive_bundles_legacy_tde(wb_id) else "")
             warns.append(_PBIP_WARN + f"embedded datasource {label!r} needs a storage decision "
-                         f"({rationale}) -- workbook .pbip skipped (model lands separately)")
+                         f"({rationale}{tde_note}) -- workbook .pbip skipped (model lands separately)")
             return
 
     report_parts = _rebind_report_byPath(result["parts"], model_safe)
