@@ -14,6 +14,35 @@ and clearly flags the 20% that stays a human decision (complex LOD/table calcs,
 ambiguous relationships, storage-mode choice, native-source rebind). This folder
 proves that with a real offline run.
 
+## Contents
+
+A map of this README and the deep-dive docs, so anyone can jump straight to what they need.
+
+**Start here**
+- [The journey at a glance](#the-journey-at-a-glance) — the 3 stages, one table
+- [Clone-to-completion in 5 steps](#clone-to-completion-in-5-steps) — fresh clone → openable model
+- [Step 0 — Get your Tableau files out](#step-0--get-your-tableau-files-out-and-staging-a-large-estate)
+- [Convert a report — one command](#convert-a-tableau-report-to-a-power-bi-semantic-model-one-command)
+
+**What you get & how it works**
+- [What's here](#whats-here) — the repo map (folders & files)
+- [The offline proof (what actually ran)](#the-offline-proof-what-actually-ran)
+- [What happens to my dashboards & visuals?](#what-happens-to-my-dashboards--visuals)
+- [Is the model ready for Copilot / Q&A?](#is-the-model-ready-for-copilot--qa)
+- [Calculations, LOD, parameters & custom SQL](#how-does-it-handle-my-calculations-lod-expressions-parameters--custom-sql)
+
+**Scale & operations**
+- [Planning a large estate (150+ workbooks)](#planning-a-large-estate-eg-150-workbooks--what-to-expect)
+- [Reproduce the run](#reproduce-the-run)
+- [Recreate the sample](#recreate-the-sample-optional)
+- [Publish into Fabric (Stage 3)](#publish-into-fabric-stage-3)
+- [Provenance & honesty note](#provenance--honesty-note)
+
+**Deep-dive docs** (`docs/`)
+- [Customer response](docs/customer-response.md) · [Architecture](docs/architecture.md) · [Real-source binding runbook](docs/real-source-binding-runbook.md)
+- [Assessment methodology](docs/assessment-methodology.md) · [Competitive analysis](docs/competitive-analysis.md)
+- [DirectLake & mirroring flow](docs/directlake-mirroring-flow.md) · [Semantic-model best practices](docs/semantic-model-best-practices.md)
+
 ## The journey at a glance
 
 Three stages take you from a Tableau file to a live Fabric report. **Stage 1 is the
@@ -187,6 +216,7 @@ skip; run just those on any x64 box or CI runner, or bind to the live warehouse 
 |---|---|
 | `engine/` | Cloned [`tableau-fabric-skills`](https://github.com/Yarbrdab000/tableau-fabric-skills) — the community/field migration engine (the `tableau-migration` skill is the workhorse). |
 | `sample/` | `Superstore.tds` + `Superstore.twb` — a real-shaped sample datasource + workbook (offline; no live Tableau needed). |
+| `customer-estate/` | A 13-workbook offline **test estate** (diverse shapes: live SQL, `.hyper` + legacy `.tde` extracts, federated, flat-file) — the corpus behind the breadth / resilience test. |
 | `scripts/Convert-TableauToPowerBI.ps1` | **The shareable tool** — one-command wrapper over the engine. |
 | `output/` | **The proof.** The actual generated bundle from a run: TMDL semantic model, calc→DAX measures, and an openable `.pbip`. |
 | `docs/customer-response.md` | Honest answers to the customer's 5 questions. |
@@ -194,6 +224,8 @@ skip; run just those on any x64 box or CI runner, or bind to the live warehouse 
 | `docs/real-source-binding-runbook.md` | **Worked example against a real backend.** End-to-end native-source rebind on Azure SQL: provisioning, Entra-only auth, giving each datasource a resolvable descriptor, re-running to bind two workbooks — plus best-practice validation vs. real enterprise migrations. |
 | `docs/assessment-methodology.md` | How to size a 150-workbook estate and estimate effort. |
 | `docs/competitive-analysis.md` | How we compare to public migration guides / commercial accelerators, and the ranked ideas worth stealing. |
+| `docs/directlake-mirroring-flow.md` | How the accelerator reaches a **DirectLake** end state — where mirroring fits and how workbooks map to semantic models at estate scale. |
+| `docs/semantic-model-best-practices.md` | The modeling guardrails and what stays a human step when the target is **DirectLake + Copilot/Q&A**. |
 | `engine/skills/tableau-migration/resources/viz-rebuild.md` | The visual layer: which Tableau chart types rebuild into which Power BI visuals, and what is deferred to a warning. |
 
 ## The offline proof (what actually ran)
