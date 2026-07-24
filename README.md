@@ -107,6 +107,17 @@ matrix — is in [docs/architecture.md](docs/architecture.md).
 
 ## Quick start (get a working result in ~60 seconds)
 
+**Which folder do I use?** Three folders, three jobs — this is the whole mental model:
+
+| Folder | What it's for | Who puts files there |
+|--------|---------------|----------------------|
+| **`sample/`** | One tiny workbook for the 60‑second test below. **Don't edit it.** | Ships with the repo |
+| **`sample-workbooks/`** | A gallery of real Tableau *Viz of the Day* dashboards to try bigger, realistic conversions. | Ships with the repo |
+| **`workbooks/`** | **Your own / your customer's files.** Drop your `.twb` / `.twbx` / `.tds` / `.tdsx` here and run. | **You** — it's git‑ignored, so nothing sensitive is ever committed |
+
+> **Rule of thumb:** kicking the tires → use `sample/` or `sample-workbooks/`. Doing real work →
+> put files in **`workbooks/`**. Output always lands in the folder you pass to `-Output` (e.g. `.\out`).
+
 **The only prerequisite is Python 3.11+** on your PATH — nothing else for the offline core
 (no `pip install`, no internet, no Azure). Check it with `py -3.11 --version` (Windows) or
 `python3 --version`. On **macOS/Linux**, install **PowerShell 7** to use the wrapper, or run the
