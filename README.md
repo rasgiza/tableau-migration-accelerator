@@ -134,7 +134,15 @@ as annotations), an openable **`.pbip`**, and a `report.json` + `summary.md`.
 > that call, then finishing the flagged 20%, is [Stage 2–3](#the-journey-at-a-glance). Correct-or-
 > abstain is the whole point: the tool never silently ships a model it can't stand behind.
 
-**Convert your own workbook, or a whole folder of exports:**
+**Convert your own workbooks.** After cloning, the repo has a ready-made **`workbooks/`**
+folder — drop your `.twb` / `.twbx` / `.tds` / `.tdsx` there (a single file or many), then:
+
+```powershell
+.\scripts\Convert-TableauToPowerBI.ps1 -Source .\workbooks -Output .\out
+```
+
+Your files in `workbooks/` are git-ignored, so customer workbooks are never committed. You can
+also point `-Source` at any path instead — a single file or a folder of exports:
 
 ```powershell
 .\scripts\Convert-TableauToPowerBI.ps1 -Source C:\exports\MyDashboard.twbx

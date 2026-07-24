@@ -27,6 +27,11 @@ my-test-votd/
 _dl_in/
 _votd_in/
 
+# Your own Tableau workbooks dropped in for a run (never committed). The folder
+# and its README stay tracked; any workbook/datasource artifacts inside do not.
+workbooks/*
+!workbooks/README.md
+
 # Root-level scratch scripts / probes / dumps (regenerable, not part of the engine)
 /_*.py
 /_*.jsonl
