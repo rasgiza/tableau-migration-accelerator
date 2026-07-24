@@ -1,15 +1,19 @@
 # Reference Architecture — Tableau → Power BI / Fabric
 
 This document describes the target architecture, the **two migration motions**, and a
-**phased, Revenue-Cycle-first** plan for the customer's estate (150+ workbooks, Snowflake as
-source of truth, Fabric F64).
+**phased, domain-first** rollout plan. It is **source-agnostic**: your system of record can be
+**Snowflake, Azure SQL, Databricks, Fabric SQL, or any warehouse** — the semantic model binds
+by table name, so the ingestion path can change without rewriting the model. Where a concrete
+example helps, this doc uses a **150+ workbook estate on a warehouse, landing on Fabric F64,
+Revenue-Cycle domain first**; treat those specifics as *illustrative*, not required.
 
 ---
 
 ## Design principles
 
-1. **Snowflake stays the source of truth.** No data fork. Fabric reads Snowflake via
-   Shortcuts, and semantic models serve via **DirectLake**.
+1. **Your warehouse stays the source of truth.** No data fork. Fabric reads it via
+   **Mirroring or Shortcuts** (Snowflake, Azure SQL, Databricks, Fabric SQL, ...), and
+   semantic models serve via **DirectLake**.
 2. **Automate the mechanical, surface the judgement.** Schema, types, and safe-subset
    calc→DAX are deterministic and auditable. Complex calcs, relationships, and storage-mode
    decisions are explicit human gates — never silently guessed.
@@ -51,7 +55,7 @@ Fabric-native model + report as code, then deploys to F64.
 flowchart LR
     subgraph Source
       TWBX[.twb / .twbx / .tds / .tdsx]
-      SNOW[(Snowflake<br/>source of truth)]
+      SNOW[(Warehouse - source of truth<br/>Snowflake / Azure SQL / Databricks)]
     end
     TWBX --> PARSE[Deterministic parser]
     PARSE --> TMDL[Typed TMDL<br/>semantic model]
@@ -79,7 +83,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    SNOW[(Snowflake<br/>system of record)]
+    SNOW[(Warehouse - system of record<br/>Snowflake / Azure SQL / Databricks)]
     SNOW -->|Mirroring / Shortcut| OL[(OneLake<br/>Delta tables)]
     OL --> SM[Power BI semantic models<br/>DirectLake · TMDL in Git]
     SM --> RPT[Power BI reports<br/>PBIR]
@@ -90,12 +94,12 @@ flowchart TB
     RPT --- GIT
 ```
 
-**Why DirectLake over Snowflake:** keeps Snowflake authoritative, avoids import refresh
-windows at F64 scale, and lets the semantic model bind by table/schema name so the ingestion
+**Why DirectLake over your warehouse:** keeps the warehouse authoritative, avoids import refresh
+windows at F-SKU scale, and lets the semantic model bind by table/schema name so the ingestion
 path (Mirroring vs. Shortcut vs. staged Delta) can change without rewriting the model.
 
 **Native-source rebind:** the engine emits the model with the source connection abstracted.
-The live-pipeline step points those tables at the OneLake Delta landing of Snowflake. This is
+The live-pipeline step points those tables at the OneLake Delta landing of your warehouse. This is
 a deliberate manual/config step (the offline demo proves model+calc generation; the rebind is
 where real data lands).
 
@@ -107,7 +111,7 @@ where real data lands).
 
 ---
 
-## Phased plan — Revenue-Cycle-first
+## Phased plan — domain-first (Revenue-Cycle example)
 
 | Phase | Goal | Key activities | Exit criteria |
 |---|---|---|---|
@@ -134,4 +138,4 @@ where real data lands).
 > **Fidelity caveat:** a `.twbx`/`.twb` file gives model + calc + layout fidelity but not row
 > data and may omit hidden join keys. The offline demo proves calc→DAX / TMDL / PBIP
 > generation; **relationship inference and data landing are the live-pipeline (Phase 1–2)
-> step**, best done against published datasources (via Tableau MCP / VDS) + Snowflake.
+> step**, best done against published datasources (via Tableau MCP / VDS) + your warehouse.
