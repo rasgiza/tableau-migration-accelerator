@@ -19,6 +19,7 @@ proves that with a real offline run.
 A map of this README and the deep-dive docs, so anyone can jump straight to what they need.
 
 **Start here**
+- [Big picture (end-to-end architecture)](#big-picture-end-to-end)
 - [Quick start (working result in ~60 seconds)](#quick-start-get-a-working-result-in-60-seconds)
 - [The journey at a glance](#the-journey-at-a-glance) — the 3 stages, one table
 - [Clone-to-completion in 5 steps](#clone-to-completion-in-5-steps) — fresh clone → openable model
@@ -43,6 +44,66 @@ A map of this README and the deep-dive docs, so anyone can jump straight to what
 - [Customer response](docs/customer-response.md) · [Architecture](docs/architecture.md) · [Real-source binding runbook](docs/real-source-binding-runbook.md)
 - [Assessment methodology](docs/assessment-methodology.md) · [Competitive analysis](docs/competitive-analysis.md)
 - [DirectLake & mirroring flow](docs/directlake-mirroring-flow.md) · [Semantic-model best practices](docs/semantic-model-best-practices.md)
+
+## Big picture (end to end)
+
+Keep your data where it is; migrate the **intelligence** (models, calculations, reports) as
+reviewable **code**, and serve it on Fabric via **DirectLake**. This is **source-agnostic** —
+your system of record can be **Snowflake, Azure SQL, Databricks, Fabric SQL, or any warehouse**;
+the model binds by table name, so the ingestion path can change without rewriting the model.
+
+```mermaid
+flowchart LR
+    subgraph SRC["1 - SOURCE (stays put)"]
+        TAB[(Tableau Server / Cloud<br/>or Desktop)]
+        WH[(Your warehouse<br/>Snowflake / Azure SQL / Databricks)]
+    end
+    subgraph EXPORT["2 - EXPORT blueprints (MB, not TB)"]
+        FILES[.twb / .twbx / .tds / .tdsx]
+    end
+    subgraph ACCEL["3 - ACCELERATOR (offline, deterministic)"]
+        PARSE[Parse + inventory] --> MODEL[Typed TMDL model]
+        PARSE --> CALC[Calc -> DAX<br/>safe subset + preserved stubs]
+        PARSE --> VIZ[Report pages / visuals]
+        MODEL --> PBIP[.pbip project in Git]
+        CALC --> PBIP
+        VIZ --> PBIP
+    end
+    subgraph GATES["Human gates (never guessed)"]
+        LOD[Complex LOD / table calcs]
+        REL[Relationship review]
+        STORE[Storage mode: Import vs DirectLake]
+    end
+    subgraph FABRIC["4 - FABRIC target (F-SKU workspace)"]
+        OL[(OneLake Delta<br/>Mirroring / Shortcut)]
+        SM[Semantic model<br/>DirectLake]
+        RPT[Power BI reports]
+        COP["Copilot / Q&A"]
+        USERS[Business users]
+    end
+    TAB --> FILES --> PARSE
+    WH -. Mirror/Shortcut .-> OL
+    PBIP -->|Fabric REST CI/CD| SM
+    OL -->|bind by table name| SM
+    SM --> RPT --> USERS
+    SM --> COP
+    CALC -.review.-> LOD
+    MODEL -.review.-> REL
+    PBIP -.decide.-> STORE
+```
+
+**What stays, what moves, what a human decides:**
+
+| Layer | What we present | The reassurance it gives |
+|---|---|---|
+| **Source** | Tableau + your warehouse stay authoritative | No data fork; reversible until each wave is signed off |
+| **Export** | You move *blueprints* (workbook XML + calc/lineage), not rows | A 150-workbook estate is megabytes; data never leaves the warehouse |
+| **Accelerator** | Offline, deterministic parse → **TMDL + DAX + `.pbip`** | Same input → same output; fully auditable; no cloud or credentials |
+| **Human gates** | Three things it *refuses to guess* | Correct-or-abstain: you're never handed a silently-wrong model |
+| **Fabric** | DirectLake over OneLake, PBIP-in-Git, deployed by REST | All-Fabric end state, no import-refresh windows, Copilot-ready |
+
+Full reference — the two migration motions, the phased rollout, and the automated-vs-manual
+matrix — is in [docs/architecture.md](docs/architecture.md).
 
 ## Quick start (get a working result in ~60 seconds)
 
