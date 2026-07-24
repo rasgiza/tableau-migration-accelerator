@@ -231,6 +231,25 @@ TRANSLATIONS = [
     # uses EXACT for Tableau's case-sensitive string equality.
     ("COUNTD(IF [Region] = \"East\" THEN [Quantity] END)",
      "COALESCE(CALCULATE(DISTINCTCOUNTNOBLANK('Orders'[Quantity]), FILTER('Orders', EXACT('Orders'[Region], \"East\"))), 0)"),
+    # --- Tableau typeless NULL literal -> DAX BLANK(); compatible with any IF/CASE/IIF branch ---
+    # "ELSE NULL" is Tableau's explicit form of an unmatched branch -> an explicit BLANK() else
+    # (semantically identical to the no-ELSE 2-arg IF the X-iterators already skip). Unblocks the
+    # dominant real-workbook "SUM(IF rowcond THEN expr ELSE NULL END)" current-vs-prior measures.
+    ("SUM(IF [Region] = \"East\" THEN [Sales] ELSE NULL END)",
+     "SUMX('Orders', IF(EXACT('Orders'[Region], \"East\"), 'Orders'[Sales], BLANK()))"),
+    ("COUNT(IF [Region] = \"East\" THEN [Sales] ELSE NULL END)",
+     "COUNTAX('Orders', IF(EXACT('Orders'[Region], \"East\"), 'Orders'[Sales], BLANK()))"),
+    ("IF SUM([Sales]) > 0 THEN SUM([Profit]) ELSE NULL END",
+     "IF(SUM('Orders'[Sales]) > 0, SUM('Orders'[Profit]), BLANK())"),
+    # A NULL in the THEN position takes its type from the concrete ELSE (reconciliation is order-free).
+    ("IF SUM([Sales]) > 0 THEN NULL ELSE SUM([Profit]) END",
+     "IF(SUM('Orders'[Sales]) > 0, BLANK(), SUM('Orders'[Profit]))"),
+    ("IIF(SUM([Sales]) > 0, SUM([Profit]), NULL)",
+     "IF(SUM('Orders'[Sales]) > 0, SUM('Orders'[Profit]), BLANK())"),
+    ('IF SUM([Sales]) > 0 THEN "win" ELSE NULL END',
+     'IF(SUM(\'Orders\'[Sales]) > 0, "win", BLANK())'),
+    ("CASE SUM([Quantity]) WHEN 0 THEN 1 ELSE NULL END",
+     "SWITCH(SUM('Orders'[Quantity]), 0, 1, BLANK())"),
     # --- ATAN2 / ATTR / GROUP_CONCAT (measure-context breadth additions) ---
     # ATAN2(y, x): y is the FIRST argument. DAX has no ATAN2, so the quadrant is rebuilt with SWITCH,
     # which evaluates only the matched branch -> ATAN(y / x) never runs in the x = 0 cases.
@@ -308,6 +327,11 @@ FALLBACKS = [
     'SUM(IF [Region] = "East" THEN [Region] END)',   # SUM over a text expression
     "COUNTD([Sales]*[Quantity])",                 # COUNTD supports only the IF-of-field shape
     'COUNTD(IF [Region] = "East" THEN [Quantity] ELSE [Profit] END)',  # COUNTD(IF ... ELSE) unsupported
+    # typeless NULL is CONTAINED: legal only in an IF/CASE/IIF branch, else fall back (no wrong DAX)
+    "SUM([Sales]) + NULL",                        # NULL in arithmetic is not numeric
+    "ZN(NULL)",                                   # ZN requires a numeric operand
+    "NULL > SUM([Sales])",                        # NULL is not comparable to a number
+    "IF NULL THEN 1 ELSE 0 END",                  # NULL is not a boolean condition
     # type-invalid aggregations
     "SUM([Region])",                              # SUM on string
     "AVG([Order Date])",                          # AVG on dateTime
@@ -557,6 +581,38 @@ def test_non_param_aggregate_unaffected_by_collapse_guard():
 def test_count_maps_to_counta_not_count():
     # Tableau COUNT counts non-null of any type; DAX COUNT errors on text -> COUNTA.
     assert _tx("COUNT([Region])") == "COUNTA('Orders'[Region])"
+
+
+def test_value_parameter_filter_measure_translates():
+    # The dominant real-workbook pattern: SUM(IF rowcol = [Parameters].[scalar] THEN [x] ELSE NULL
+    # END). The value parameter resolves to its SELECTEDVALUE measure and the conditional aggregation
+    # folds to an X-iterator, so the whole "current period vs selected parameter" measure translates.
+    dax, reason, tables = translate_tableau_calc_to_dax(
+        "SUM(IF [Quantity] = [Parameters].[Goal] THEN [Sales] ELSE NULL END)",
+        _resolver, param_resolver=_param_resolver)
+    assert reason == "ok"
+    assert dax == "SUMX('Orders', IF('Orders'[Quantity] = [Goal Value], 'Orders'[Sales], BLANK()))"
+    assert tables == {"Orders"}
+
+
+def test_countd_value_parameter_filter_measure_translates():
+    # COUNTD variant of the same shape -> CALCULATE + FILTER, with the param as the row-level bound.
+    dax, reason, _ = translate_tableau_calc_to_dax(
+        "COUNTD(IF [Quantity] = [Parameters].[Goal] THEN [Region] END)",
+        _resolver, param_resolver=_param_resolver)
+    assert reason == "ok"
+    assert dax == (
+        "COALESCE(CALCULATE(DISTINCTCOUNTNOBLANK('Orders'[Region]), "
+        "FILTER('Orders', 'Orders'[Quantity] = [Goal Value])), 0)")
+
+
+def test_else_null_equals_no_else_semantically():
+    # ELSE NULL and no-ELSE are the same Tableau semantics; both must translate (the only textual
+    # difference is an explicit BLANK() else vs the 2-arg IF).
+    with_else = _tx("SUM(IF [Region] = \"East\" THEN [Sales] ELSE NULL END)")
+    no_else = _tx("SUM(IF [Region] = \"East\" THEN [Sales] END)")
+    assert with_else == "SUMX('Orders', IF(EXACT('Orders'[Region], \"East\"), 'Orders'[Sales], BLANK()))"
+    assert no_else == "SUMX('Orders', IF(EXACT('Orders'[Region], \"East\"), 'Orders'[Sales]))"
 
 
 def test_countd_maps_to_distinctcountnoblank():
