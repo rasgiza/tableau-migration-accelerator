@@ -136,10 +136,18 @@ as annotations), an openable **`.pbip`**, and a `report.json` + `summary.md`.
 > that call, then finishing the flagged 20%, is [Stage 2–3](#the-journey-at-a-glance). Correct-or-
 > abstain is the whole point: the tool never silently ships a model it can't stand behind.
 
+**Try more realistic samples.** The repo also ships a **`sample-workbooks/`** gallery of real
+Tableau Public *Viz of the Day* dashboards, so you can convert something meatier on a fresh clone
+— no Tableau account, no exporting:
+
+```powershell
+.\scripts\Convert-TableauToPowerBI.ps1 -Source .\sample-workbooks -Output .\out
+```
+
 **Convert your own workbooks.** Step 3 above used the bundled `sample/` file only to prove the
-tool runs. For **real work** — workbooks you download from Tableau Online, or a customer's own
-exports — use the ready-made **`workbooks/`** folder: drop your `.twb` / `.twbx` / `.tds` /
-`.tdsx` there (a single file or many), then:
+tool runs, and `sample-workbooks/` is our demo gallery. For **real work** — workbooks you download
+from Tableau Online, or a customer's own exports — use the ready-made **`workbooks/`** folder: drop
+your `.twb` / `.twbx` / `.tds` / `.tdsx` there (a single file or many), then:
 
 ```powershell
 .\scripts\Convert-TableauToPowerBI.ps1 -Source .\workbooks -Output .\out
