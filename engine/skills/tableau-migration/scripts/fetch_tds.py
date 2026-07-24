@@ -108,10 +108,12 @@ def build_signin_body(site_content_url, pat_name=None, pat_secret=None, jwt=None
     }
 
 
-def datasources_url(server, rest_version, site_id, name=None, page_size=100):
+def datasources_url(server, rest_version, site_id, name=None, page_size=100, page_number=None):
     """List/filter URL for published datasources on a site."""
     base = f"{rest_base(server, rest_version)}/sites/{site_id}/datasources"
     params = {"pageSize": str(page_size)}
+    if page_number is not None:
+        params["pageNumber"] = str(page_number)
     if name:
         params["filter"] = f"name:eq:{name}"
     return base + "?" + urllib.parse.urlencode(params)
@@ -125,10 +127,12 @@ def download_content_url(server, rest_version, site_id, datasource_id, include_e
         {"includeExtract": "true" if include_extract else "false"})
 
 
-def workbooks_url(server, rest_version, site_id, name=None, page_size=100):
+def workbooks_url(server, rest_version, site_id, name=None, page_size=100, page_number=None):
     """List/filter URL for published workbooks on a site (mirror of ``datasources_url``)."""
     base = f"{rest_base(server, rest_version)}/sites/{site_id}/workbooks"
     params = {"pageSize": str(page_size)}
+    if page_number is not None:
+        params["pageNumber"] = str(page_number)
     if name:
         params["filter"] = f"name:eq:{name}"
     return base + "?" + urllib.parse.urlencode(params)

@@ -44,6 +44,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
@@ -212,13 +213,13 @@ def _csv_env(value):
 
 
 class LiveTableauSource(TableauSource):
-    """Documented SEAM for a live Tableau Server / Cloud connection -- network calls NOT built yet.
+    """Live Tableau Server / Cloud source: sign in with a PAT, pull ``.tds`` / ``.twb`` over REST.
 
-    The orchestrator already runs end-to-end against :class:`LocalFilesSource` /
-    :class:`InMemoryTableauSource`; finishing this adapter is the only remaining work to make the
-    one-button flow pull straight from a live site. The method surface is fixed here so the rest
-    of the pipeline never has to change, and the *configuration* surface already captures the
-    three live concerns the integrator wires up -- without ever holding a secret or a GUID:
+    The orchestrator drives this exactly like :class:`LocalFilesSource` /
+    :class:`InMemoryTableauSource`; the network layer delegates to the tested stdlib client in
+    :mod:`fetch_tds`. The method surface matches the other sources so the rest of the pipeline
+    never changes, and the *configuration* surface captures the three live concerns the integrator
+    wires up -- without ever holding a secret or a GUID:
 
     * **Runtime PAT from Key Vault.** The object stores only the *names* needed to fetch a
       Personal Access Token at run time (the vault name, the secret name, the token name). The
@@ -231,7 +232,7 @@ class LiveTableauSource(TableauSource):
     * **Fabric target.** ``fabric_workspace`` records the destination workspace *name* so the
       report/deploy step knows where the bundle is headed.
 
-    Intended implementation path (offline-safe seam -- no network calls are made today):
+    Flow (each step delegates to :mod:`fetch_tds`):
 
     1. **Authenticate.** :meth:`_resolve_pat` pulls the PAT secret from Azure Key Vault at run
        time (Azure CLI ``az keyvault secret show`` or ``azure-identity`` +
@@ -247,9 +248,9 @@ class LiveTableauSource(TableauSource):
     4. **(Optional) enrich.** Pull lineage / relationship metadata from the Tableau **Metadata
        API** (GraphQL) to feed relationship inference and the report.
 
-    Credentials and on-prem gateway setup stay with the user (security boundary). Until the
-    network calls are built, the ``list_*`` / ``read_*`` / auth methods raise
-    :class:`NotImplementedError`; unit tests substitute :class:`InMemoryTableauSource`.
+    Credentials and on-prem gateway setup stay with the user (security boundary). The network
+    layer is the tested stdlib client in :mod:`fetch_tds`; unit tests substitute fakes for its
+    functions (or use :class:`InMemoryTableauSource`) to run fully offline.
     """
 
     def __init__(self, server_url=None, site=None, *, key_vault_name=None, pat_secret_name=None,
@@ -284,9 +285,12 @@ class LiveTableauSource(TableauSource):
         # Value-free trace of which credential layer last answered (set by _resolve_pat); never a
         # token value. None until a PAT is resolved.
         self._pat_source = None
-        # Populated by the real list_* implementation (catalog id -> display name) so asset_name
-        # can report human names; empty until the network seam is built.
+        # Populated by list_* (catalog id -> display name) so asset_name reports human names.
         self._name_by_id = {}
+        # Cached live session, set lazily by _ensure_session/_signin. The PAT secret is never
+        # stored; only the exchanged X-Tableau-Auth token + resolved site id live here for the run.
+        self._auth_token = None
+        self._site_id = None
 
     @staticmethod
     def _select_by_name(catalog, wanted_names):
@@ -315,13 +319,6 @@ class LiveTableauSource(TableauSource):
                 picked.append((cid, name))
         picked.sort(key=lambda pair: (pair[1].casefold(), str(pair[0])))
         return picked
-
-    def _not_implemented(self, what):
-        return NotImplementedError(
-            f"LiveTableauSource.{what} is a seam: implement Tableau REST/Metadata-API access "
-            f"(see the class docstring and resources/orchestration.md). Use "
-            f"InMemoryTableauSource or LocalFilesSource for offline runs."
-        )
 
     def _resolve_pat(self):
         """Resolve the Tableau PAT *secret* at run time, Key-Vault-free first.
@@ -354,39 +351,113 @@ class LiveTableauSource(TableauSource):
         return resolved.value
 
     def _resolve_pat_from_key_vault(self):
-        """SEAM: fetch the PAT *secret* from Azure Key Vault at run time (enterprise alternative).
+        """Fetch the PAT *secret* from Azure Key Vault at run time (enterprise alternative).
 
-        Used only when no local credential layer (see :meth:`_resolve_pat`) is configured or yields a
-        value. Implement with the Azure CLI already on the box::
+        Used only when no local credential layer (see :meth:`_resolve_pat`) is configured or yields
+        a value. Shells out to the Azure CLI already on the box::
 
-            az keyvault secret show --vault-name <self.key_vault_name> \\
-                --name <self.pat_secret_name> --query value -o tsv
+            az keyvault secret show --vault-name <key_vault_name> --name <pat_secret_name> \\
+                --query value -o tsv
 
-        or ``azure-identity`` ``DefaultAzureCredential`` + ``azure-keyvault-secrets``
-        ``SecretClient``. Return the token string; never log it, never persist it, never place it
-        in the report. Raises until implemented.
+        The resolved token is returned to the caller only; it is never logged, persisted, or placed
+        in the report (only the value-free ``_pat_source`` layer label is kept). Fails fast with a
+        clear error when the vault/secret names are missing, the CLI is absent, or the fetch errors
+        -- correct-or-abstain, never a silent empty token.
         """
-        raise self._not_implemented("_resolve_pat")
+        if not (self.key_vault_name and self.pat_secret_name):
+            raise ValueError(
+                "Key Vault PAT fetch needs BOTH key_vault_name and pat_secret_name (or supply the "
+                "PAT via a local layer: pat_value / TABLEAU_PAT env / env_file / keyring).")
+        az = shutil.which("az")
+        if not az:
+            raise RuntimeError(
+                "Azure CLI 'az' was not found on PATH; install it, or supply the Tableau PAT via a "
+                "local layer (pat_value / TABLEAU_PAT env / env_file / keyring).")
+        try:
+            proc = subprocess.run(
+                [az, "keyvault", "secret", "show", "--vault-name", self.key_vault_name,
+                 "--name", self.pat_secret_name, "--query", "value", "-o", "tsv"],
+                capture_output=True, text=True, timeout=60, check=True)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Key Vault secret fetch timed out after 60s.") from None
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"Key Vault secret fetch failed (az exit {exc.returncode}): "
+                f"{(exc.stderr or '').strip()[:300]}") from None
+        value = (proc.stdout or "").strip()
+        if not value:
+            raise RuntimeError(
+                f"Key Vault {self.key_vault_name!r} returned an empty secret "
+                f"{self.pat_secret_name!r}.")
+        self._pat_source = f"keyvault:{self.key_vault_name}"
+        return value
 
     def _signin(self, pat_secret):
-        """SEAM: exchange ``self.pat_name`` + ``pat_secret`` for an ``X-Tableau-Auth`` token."""
-        raise self._not_implemented("_signin")
+        """Exchange ``self.pat_name`` + ``pat_secret`` for an ``X-Tableau-Auth`` token (cached).
+
+        Delegates to the tested :func:`fetch_tds.sign_in` (stdlib ``urllib``). Caches the session
+        token and site id on the instance; the PAT secret is used once and never retained. Returns
+        the token (callers must not log it).
+        """
+        if not self.server_url:
+            raise ValueError("LiveTableauSource needs a server_url (or TABLEAU_SERVER_URL).")
+        token, site_id = F.sign_in(self.server_url, self.api_version, self.site or "",
+                                   pat_name=self.pat_name, pat_secret=pat_secret)
+        self._auth_token = token
+        self._site_id = site_id
+        return token
+
+    def _ensure_session(self):
+        """Lazily resolve the PAT and sign in once; later calls reuse the cached token."""
+        if not self._auth_token:
+            self._signin(self._resolve_pat())
+
+    def _catalog(self, kind):
+        """Page through EVERY published ``kind`` ('datasources'/'workbooks') -> ``[{id, name}]``.
+
+        Follows Tableau REST pagination (``pageNumber`` / ``totalAvailable``) so a site with more
+        than one page of assets is fully enumerated. Network method; the pure name-narrowing is
+        :meth:`_select_by_name`.
+        """
+        self._ensure_session()
+        if kind == "datasources":
+            url_for, container, item = F.datasources_url, "datasources", "datasource"
+        else:
+            url_for, container, item = F.workbooks_url, "workbooks", "workbook"
+        catalog, page = [], 1
+        while True:
+            url = url_for(self.server_url, self.api_version, self._site_id,
+                          page_size=100, page_number=page)
+            out = F._http_json("GET", url, token=self._auth_token)
+            block = (out.get(container) or {}).get(item) or []
+            catalog.extend({"id": e.get("id"), "name": e.get("name")} for e in block)
+            total = int((out.get("pagination") or {}).get("totalAvailable") or 0)
+            if not block or len(block) < 100 or len(catalog) >= total:
+                break
+            page += 1
+        return catalog
 
     def list_datasources(self):
-        # Real impl: catalog = <GET .../datasources, paged>; then
-        #   picked = self._select_by_name(catalog, self.datasource_names)
-        #   self._name_by_id.update(dict(picked)); return [cid for cid, _ in picked]
-        raise self._not_implemented("list_datasources")
+        picked = self._select_by_name(self._catalog("datasources"), self.datasource_names)
+        self._name_by_id.update({cid: name for cid, name in picked})
+        return [cid for cid, _ in picked]
 
     def read_datasource(self, ds_id):
-        raise self._not_implemented("read_datasource")
+        self._ensure_session()
+        _cd, raw = F.download_datasource(self.server_url, self.api_version, self._site_id,
+                                         self._auth_token, ds_id, include_extract=False)
+        return F.inner_tds_from_zip(raw) if F.is_zip(raw) else raw.decode("utf-8-sig")
 
     def list_workbooks(self):
-        # Real impl mirrors list_datasources against .../workbooks and self.workbook_names.
-        raise self._not_implemented("list_workbooks")
+        picked = self._select_by_name(self._catalog("workbooks"), self.workbook_names)
+        self._name_by_id.update({cid: name for cid, name in picked})
+        return [cid for cid, _ in picked]
 
     def read_workbook(self, wb_id):
-        raise self._not_implemented("read_workbook")
+        self._ensure_session()
+        _cd, raw = F.download_workbook(self.server_url, self.api_version, self._site_id,
+                                       self._auth_token, wb_id, include_extract=False)
+        return F.inner_doc_from_zip(raw) if F.is_zip(raw) else raw.decode("utf-8-sig")
 
     def asset_name(self, asset_id):
         return self._name_by_id.get(asset_id, str(asset_id))
@@ -404,7 +475,7 @@ class LiveTableauSource(TableauSource):
             "datasource_names": self.datasource_names,
             "workbook_names": self.workbook_names,
             "api_version": self.api_version,
-            "implemented": False,
+            "implemented": True,
         }
 
 
@@ -3973,8 +4044,9 @@ def main(argv=None):
         prog="migrate_estate",
         description="One-button Tableau -> Microsoft Fabric estate migration (offline-first).",
     )
-    parser.add_argument("-i", "--input", required=True,
-                        help="folder of exported Tableau .tds / .twb files")
+    parser.add_argument("-i", "--input",
+                        help="folder of exported Tableau .tds / .twb (.tdsx / .twbx) files "
+                             "(omit when --tableau-server pulls from a live site)")
     parser.add_argument("-o", "--output", required=True,
                         help="output bundle folder (semantic models + pbip + report.json + summary.md)")
     parser.add_argument("--no-pbip", action="store_true",
@@ -4030,6 +4102,27 @@ def main(argv=None):
                              "them). Run ONLY after executing the generated directlake-materialization"
                              ".sql in the Lakehouse -- otherwise the model binds to a table that does "
                              "not exist yet. Off by default (ships bound to the raw Delta tables).")
+    live = parser.add_argument_group(
+        "live Tableau source (pull over REST instead of reading local files)")
+    live.add_argument("--tableau-server", metavar="URL", default=None,
+                      help="pull assets LIVE from a Tableau Server / Cloud site over REST instead of "
+                           "reading local files (e.g. https://10ay.online.tableau.com). When set, -i "
+                           "is optional. The PAT secret is resolved from (in order) TABLEAU_PAT env, "
+                           "an env file, OS keyring, or Azure Key Vault (--key-vault / "
+                           "--pat-secret-name); NEVER pass a secret value on the command line.")
+    live.add_argument("--tableau-site", metavar="CONTENTURL", default=None,
+                      help="Tableau site contentUrl (the site URL slug; omit for the Default site).")
+    live.add_argument("--tableau-datasource", metavar="NAME", action="append", default=None,
+                      help="published datasource name to pull (repeatable; omit to pull ALL).")
+    live.add_argument("--tableau-workbook", metavar="NAME", action="append", default=None,
+                      help="published workbook name to pull (repeatable; omit to pull ALL).")
+    live.add_argument("--pat-name", metavar="NAME", default=None,
+                      help="Tableau Personal Access Token NAME (the secret VALUE comes from env / "
+                           "env file / keyring / Key Vault, never a flag).")
+    live.add_argument("--key-vault", metavar="NAME", default=None,
+                      help="Azure Key Vault name to fetch the PAT secret from (enterprise auth).")
+    live.add_argument("--pat-secret-name", metavar="NAME", default=None,
+                      help="secret name inside --key-vault that holds the PAT value.")
     args = parser.parse_args(argv)
 
     # Preflight: fail loudly and EARLY on the two things a tester most often gets wrong -- an old
@@ -4040,7 +4133,10 @@ def main(argv=None):
         print(f"[STOP] Python 3.11+ is required; found {sys.version.split()[0]}. "
               "Re-run with py -3.11 (or a newer python).")
         return 2
-    if not os.path.isdir(args.input):
+    if not args.tableau_server and not args.input:
+        print("[STOP] Provide either -i/--input (a local folder) or --tableau-server (a live site).")
+        return 2
+    if not args.tableau_server and not os.path.isdir(args.input):
         print(f"[STOP] Input folder not found (or not a directory): {os.path.abspath(args.input)}")
         print("       Point -i at a folder of exported Tableau .tds / .twb (.tdsx / .twbx) files.")
         return 2
@@ -4056,7 +4152,15 @@ def main(argv=None):
         parser.error(str(exc))
     second_compile = bool(args.second_compile or authored)
 
-    source = LocalFilesSource(args.input)
+    if args.tableau_server:
+        source = LiveTableauSource(
+            server_url=args.tableau_server, site=args.tableau_site,
+            key_vault_name=args.key_vault, pat_secret_name=args.pat_secret_name,
+            pat_name=args.pat_name,
+            datasource_names=args.tableau_datasource, workbook_names=args.tableau_workbook,
+            allow_prompt=True)
+    else:
+        source = LocalFilesSource(args.input)
 
     # Configure the process-wide extract-backed DirectLake seam target ONCE for the whole run, so
     # every emitted extract-backed model (workbook rebuild, standalone-datasource pass, published
@@ -4067,9 +4171,14 @@ def main(argv=None):
     # No Tableau assets in scope -> stop with an actionable message instead of emitting an empty
     # bundle (or an empty scan) that looks like a successful no-op.
     if not (source.list_datasources() or source.list_workbooks()):
-        print(f"[STOP] No Tableau assets found under {os.path.abspath(args.input)} "
-              "(looked recursively for .tds / .twb / .tdsx / .twbx).")
-        print("       Export your datasource(s)/workbook(s) into that folder and re-run.")
+        if args.tableau_server:
+            print(f"[STOP] No Tableau assets matched on {args.tableau_server} "
+                  f"(site {args.tableau_site or 'Default'!r}).")
+            print("       Check --tableau-datasource / --tableau-workbook names (omit to pull ALL).")
+        else:
+            print(f"[STOP] No Tableau assets found under {os.path.abspath(args.input)} "
+                  "(looked recursively for .tds / .twb / .tdsx / .twbx).")
+            print("       Export your datasource(s)/workbook(s) into that folder and re-run.")
         return 2
 
     if args.scan:
@@ -4087,8 +4196,9 @@ def main(argv=None):
                 print(f"  {wb['name']}: {wb['kind'] or 'no datasource detected'}")
         missing = manifest["missing_published_datasources"]
         if missing:
+            dest_hint = os.path.abspath(args.input) if args.input else "your input folder"
             print(f"[ACTION] Fetch these published datasource(s) into "
-                  f"{os.path.abspath(args.input)} BEFORE building, then re-scan: {missing}")
+                  f"{dest_hint} BEFORE building, then re-scan: {missing}")
             print('  e.g. python fetch_tds.py --datasource-name "<name>" '
                   "--include-extract --out <input folder>")
         else:

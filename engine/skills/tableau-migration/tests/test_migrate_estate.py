@@ -2374,14 +2374,14 @@ def clean_live_env(monkeypatch):
     return monkeypatch
 
 
-def test_live_source_is_a_seam_with_no_network(clean_live_env):
+def test_live_source_retains_config_without_io(clean_live_env):
     live = LiveTableauSource(
         server_url="https://tableau.example.com", site="finance",
         key_vault_name="vault-x", pat_secret_name="pat-secret", pat_name="migrator",
         datasource_names=["Superstore"], workbook_names=["Sales Dashboard"],
         fabric_workspace="workspace-x",
     )
-    # constructing it performs no I/O; config is retained
+    # constructing it performs no I/O; config is retained and no live session exists yet
     assert live.server_url == "https://tableau.example.com"
     assert live.site == "finance"
     assert live.key_vault_name == "vault-x"
@@ -2389,18 +2389,74 @@ def test_live_source_is_a_seam_with_no_network(clean_live_env):
     assert live.fabric_workspace == "workspace-x"
     assert live.datasource_names == ["Superstore"]
     assert live.workbook_names == ["Sales Dashboard"]
-    # every network-touching method is a seam until implemented
-    for call in (live.list_datasources, live.list_workbooks):
-        with pytest.raises(NotImplementedError):
-            call()
-    with pytest.raises(NotImplementedError):
-        live.read_datasource("anything")
-    with pytest.raises(NotImplementedError):
-        live.read_workbook("anything")
-    with pytest.raises(NotImplementedError):
-        live._resolve_pat()
-    with pytest.raises(NotImplementedError):
-        live._signin("token-secret")
+    assert live._auth_token is None and live._site_id is None
+
+
+def _fake_signin(*_a, **_k):
+    return "auth-token", "site-123"
+
+
+def test_live_source_lists_and_reads_over_rest(clean_live_env, monkeypatch):
+    # A fully offline exercise of the wired REST flow: sign-in + catalog + download are faked at the
+    # fetch_tds seam, so the adapter's own paging / name-narrowing / decode logic is what's tested.
+    live = LiveTableauSource(server_url="https://t.example.com", site="s",
+                             pat_value="poc-token", datasource_names=["Superstore"])
+    calls = {}
+
+    def fake_signin(server, ver, site, *, pat_name=None, pat_secret=None):
+        calls["signin"] = (server, ver, site, pat_name, pat_secret)
+        return "auth-token", "site-123"
+
+    def fake_http_json(method, url, token=None, **_k):
+        assert token == "auth-token"
+        return {"datasources": {"datasource": [
+                    {"id": "ds1", "name": "Superstore"},
+                    {"id": "ds2", "name": "Other"}]},
+                "pagination": {"totalAvailable": "2"}}
+
+    def fake_download_ds(server, ver, site_id, token, ds_id, include_extract=False):
+        assert (site_id, token, ds_id) == ("site-123", "auth-token", "ds1")
+        return None, b"<datasource caption='Superstore'/>"
+
+    monkeypatch.setattr(me.F, "sign_in", fake_signin)
+    monkeypatch.setattr(me.F, "_http_json", fake_http_json)
+    monkeypatch.setattr(me.F, "download_datasource", fake_download_ds)
+
+    ids = live.list_datasources()
+    assert ids == ["ds1"]                        # name filter kept only "Superstore"
+    assert live.asset_name("ds1") == "Superstore"
+    assert calls["signin"][3] is None            # pat_name (unset) forwarded
+    assert calls["signin"][4] == "poc-token"     # resolved PAT secret forwarded once
+    # bare .tds XML is decoded (not a zip)
+    assert live.read_datasource("ds1") == "<datasource caption='Superstore'/>"
+
+
+def test_live_source_reads_packaged_workbook_from_zip(clean_live_env, monkeypatch):
+    live = LiveTableauSource(server_url="https://t.example.com", site="s", pat_value="tok")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Sales.twb", "<workbook/>")
+    twbx_bytes = buf.getvalue()
+
+    monkeypatch.setattr(me.F, "sign_in", _fake_signin)
+    monkeypatch.setattr(me.F, "download_workbook", lambda *a, **k: (None, twbx_bytes))
+    assert live.read_workbook("wb1") == "<workbook/>"   # inner .twb extracted from the .twbx zip
+
+
+def test_live_source_pages_through_all_workbooks(clean_live_env, monkeypatch):
+    # 150 assets across two pages -> the adapter must follow pageNumber until totalAvailable is met.
+    live = LiveTableauSource(server_url="https://t.example.com", site="s", pat_value="tok")
+    page1 = [{"id": f"w{i}", "name": f"WB{i}"} for i in range(100)]
+    page2 = [{"id": f"w{i}", "name": f"WB{i}"} for i in range(100, 150)]
+
+    def fake_http_json(method, url, token=None, **_k):
+        page = page2 if "pageNumber=2" in url else page1
+        return {"workbooks": {"workbook": page},
+                "pagination": {"totalAvailable": "150"}}
+
+    monkeypatch.setattr(me.F, "sign_in", _fake_signin)
+    monkeypatch.setattr(me.F, "_http_json", fake_http_json)
+    assert len(live.list_workbooks()) == 150       # both pages enumerated (no name filter)
 
 
 def test_resolve_pat_uses_explicit_value_without_key_vault(clean_live_env):
@@ -2427,11 +2483,26 @@ def test_resolve_pat_reads_dotenv_file(clean_live_env, tmp_path):
     assert live._pat_source.startswith("dotenv:")
 
 
-def test_resolve_pat_falls_back_to_key_vault_seam_when_nothing_local(clean_live_env):
-    # No local layer configured but a Key Vault is named -> the enterprise seam (NotImplemented).
+def test_resolve_pat_falls_back_to_key_vault_via_az(clean_live_env, monkeypatch):
+    # No local layer configured but a Key Vault is named -> shell out to `az keyvault secret show`.
     live = LiveTableauSource(server_url="https://t.example.com", site="s",
                              key_vault_name="vault-x", pat_secret_name="pat-secret")
-    with pytest.raises(NotImplementedError):
+    monkeypatch.setattr(me.shutil, "which", lambda _name: "/usr/bin/az")
+
+    class _Proc:
+        stdout = "kv-token\n"
+        stderr = ""
+    monkeypatch.setattr(me.subprocess, "run", lambda *a, **k: _Proc())
+    assert live._resolve_pat() == "kv-token"
+    assert live._pat_source == "keyvault:vault-x"
+
+
+def test_resolve_pat_key_vault_missing_az_errors_clearly(clean_live_env, monkeypatch):
+    # The enterprise seam is correct-or-abstain: no `az` on PATH -> a clear error, never a blank token.
+    live = LiveTableauSource(server_url="https://t.example.com", site="s",
+                             key_vault_name="vault-x", pat_secret_name="pat-secret")
+    monkeypatch.setattr(me.shutil, "which", lambda _name: None)
+    with pytest.raises(RuntimeError, match="Azure CLI 'az'"):
         live._resolve_pat()
 
 
@@ -2448,7 +2519,7 @@ def test_live_source_describe_exposes_config_without_secrets(clean_live_env):
         "fabric_workspace", "datasource_names", "workbook_names", "api_version", "implemented",
     }
     assert desc["kind"] == "LiveTableauSource"
-    assert desc["implemented"] is False
+    assert desc["implemented"] is True
     assert desc["key_vault"] == "vault-x"
     assert desc["pat_secret_name"] == "pat-secret"
     assert desc["fabric_workspace"] == "workspace-x"
