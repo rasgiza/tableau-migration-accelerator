@@ -298,19 +298,15 @@ one deterministic batch.
 
 ## Convert a Tableau report to a Power BI semantic model (one command)
 
-This is the shareable tool. Point it at any Tableau file — get a Power BI/Fabric
-semantic model + an openable PBIP back.
+This is the shareable tool. Point it at **any** Tableau file *or a whole folder* and get a Power
+BI/Fabric semantic model + an openable PBIP back. Where to put files (bundled sample,
+`sample-workbooks/` gallery, or your own in `workbooks/`) is covered by the folder map in
+[Quick start](#quick-start-get-a-working-result-in-60-seconds).
 
 ```powershell
-# from the tableau-accelerator folder
+# from the tableau-accelerator folder — a single file, or a whole folder of exports
 .\scripts\Convert-TableauToPowerBI.ps1 -Source .\sample\Superstore.twb
-```
-
-Or against your own workbook / a whole folder of exports:
-
-```powershell
-.\scripts\Convert-TableauToPowerBI.ps1 -Source C:\exports\MyDashboard.twbx
-.\scripts\Convert-TableauToPowerBI.ps1 -Source C:\exports\revenue-cycle -Output C:\out\rc
+.\scripts\Convert-TableauToPowerBI.ps1 -Source C:\exports\all-workbooks -Output C:\out
 ```
 
 What it does, in order:
@@ -354,7 +350,9 @@ skip; run just those on any x64 box or CI runner, or bind to the live warehouse 
 | Path | What it is |
 |---|---|
 | `engine/` | Cloned [`tableau-fabric-skills`](https://github.com/Yarbrdab000/tableau-fabric-skills) — the community/field migration engine (the `tableau-migration` skill is the workhorse). |
-| `sample/` | `Superstore.tds` + `Superstore.twb` — a real-shaped sample datasource + workbook (offline; no live Tableau needed). |
+| `sample/` | `Superstore.tds` + `Superstore.twb` — a real-shaped sample datasource + workbook (offline; no live Tableau needed). The fixed **60-second Quick start** file. |
+| `sample-workbooks/` | A gallery of real Tableau Public *Viz of the Day* dashboards — try bigger, realistic conversions on a fresh clone. |
+| `workbooks/` | **Where your own / customer files go.** Drop `.twb`/`.twbx`/`.tds`/`.tdsx` here; git-ignored so nothing sensitive is committed. |
 | `customer-estate/` | A 13-workbook offline **test estate** (diverse shapes: live SQL, `.hyper` + legacy `.tde` extracts, federated, flat-file) — the corpus behind the breadth / resilience test. |
 | `scripts/Convert-TableauToPowerBI.ps1` | **The shareable tool** — one-command wrapper over the engine. |
 | `output/` | **The proof.** The actual generated bundle from a run: TMDL semantic model, calc→DAX measures, and an openable `.pbip`. |
@@ -553,7 +551,8 @@ py -3.11 -c "import sys; sys.path.insert(0, r'$fix'); import fixtures; fixtures.
 ```
 
 To run against a **real** workbook instead, drop any `.twb`/`.twbx` (or `.tds`/`.tdsx`)
-into `sample\` and re-run — the engine ingests packaged files directly.
+into the **`workbooks/`** folder and point `-Source` at it — the engine ingests packaged
+files directly. (Leave `sample/` as-is; it's the fixed 60‑second demo file.)
 
 ## Publish into Fabric (Stage 3)
 
