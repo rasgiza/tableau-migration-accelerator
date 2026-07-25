@@ -2313,6 +2313,8 @@ def _build_datasource_pbip(entry, wb_detail, twb_text, result, ds, *, label, mod
                 "a live connection"
                 if _archive_bundles_legacy_tde(wb_id) else "")
             warns.append(_PBIP_WARN + f"embedded datasource {label!r} needs a storage decision "
+                         f"-- i.e. how the Power BI model will STORE ITS DATA (Import vs DirectLake), "
+                         f"not where your Tableau files live "
                          f"({rationale}{tde_note}) -- workbook .pbip skipped (model lands separately)")
             return
 

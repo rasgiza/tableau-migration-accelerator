@@ -1287,9 +1287,10 @@ def _render_action_plan(report: Dict[str, Any]) -> str:
     if gate_open:
         actions.append((
             unbound or "\u2014", "Make the storage-mode call, then finish binding",
-            "Decide Import vs DirectLake / DirectQuery for the flagged workbook(s) &mdash; the one "
-            "thing the tool refuses to guess. Everything downstream unblocks once this is set.",
-            None))
+            "Choose how the Power BI model stores its data &mdash; Import vs DirectLake / DirectQuery. "
+            "This is about the model&rsquo;s <strong>data storage mode</strong>, <em>not</em> where your "
+            "Tableau files live. It is the one thing the tool refuses to guess; everything downstream "
+            "unblocks once it is set.", None))
     if broken:
         actions.append((
             broken, "Rebuild the views that did not survive the automatic rebuild",

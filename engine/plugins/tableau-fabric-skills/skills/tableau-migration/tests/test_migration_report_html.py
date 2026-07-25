@@ -607,6 +607,9 @@ def test_action_plan_ranks_prioritized_actions_and_links():
     assert "Start here" in h
     # the storage-mode gate (definition of done = failed) is action #1, ahead of everything else
     assert "Make the storage-mode call" in h
+    # the gate is disambiguated for first-time users: it is the model's data storage mode, not files
+    assert "data storage mode" in h
+    assert "not</em> where your" in h
     assert h.index("Make the storage-mode call") < h.index("Rebuild the views")
     assert h.index("Rebuild the views") < h.index("Finish the calculations")
     # actions deep-link to the sections that itemise them
