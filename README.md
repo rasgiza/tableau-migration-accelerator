@@ -82,7 +82,7 @@ flowchart LR
     end
     TAB --> FILES --> PARSE
     WH -. you provision: Mirror/Shortcut .-> OL
-    PBIP -->|Fabric REST CI/CD| SM
+    PBIP -->|publish via Fabric REST API| SM
     OL -->|bind by table name| SM
     SM --> RPT --> USERS
     SM --> COP
@@ -200,36 +200,50 @@ one you run today**; stages 2–3 are the same tool pointed at the cloud.
 > [Publish into Fabric](#publish-into-fabric-stage-3) below). DirectLake is always **opt-in**
 > — the tool never silently picks it for you.
 
-**Run it end to end** — the exact commands, from a fresh clone. Each step links to its deeper
-section below; the outcomes are the table above.
+**Run it end to end** — the exact commands, from a fresh clone, with **who does each step and
+whether it's automated**. The hand-off alternates 🤖 *tool* ↔ 🧑 *you*; each step links to its
+deeper section, and the outcomes are the table above.
 
-1. **Clone + check prerequisites.** **Python 3.11+** is all you need for the offline core (no
-   `pip install`, no internet, no Azure). On **macOS/Linux**, install **PowerShell 7** to use the
-   wrapper, or call `migrate_estate.py` directly.
+1. 🧑 **You (local).** **Clone + check prerequisites** — **Python 3.11+** is all the offline core
+   needs (no `pip install`, no internet, no Azure). On **macOS/Linux**, install **PowerShell 7** for
+   the wrapper, or call `migrate_estate.py` directly.
    ```powershell
    git clone <repo-url>
    cd tableau-accelerator
    ```
-2. **Get your Tableau files out** ([Step 0](#step-0--get-your-tableau-files-out-and-staging-a-large-estate)).
-   Export the `.twb`/`.twbx` **blueprints** (not the data) into a folder — by hand for a few, or via
-   REST API / `tabcmd` / Content Migration Tool for 150+.
-3. **Convert — offline** ([one command](#convert-a-tableau-report-to-a-power-bi-semantic-model-one-command)).
-   Point the tool at a file *or a whole folder* (see the [folder map](#quick-start-get-a-working-result-in-60-seconds) for where files go):
+2. 🧑 **You — Tableau (UI / REST / `tabcmd`).** **Get your files out**
+   ([Step 0](#step-0--get-your-tableau-files-out-and-staging-a-large-estate)) — export the
+   `.twb`/`.twbx` **blueprints** (not the data) into a folder; by hand for a few, or via REST API /
+   `tabcmd` / Content Migration Tool for 150+.
+3. 🤖 **The tool — offline CLI.** **Convert**
+   ([one command](#convert-a-tableau-report-to-a-power-bi-semantic-model-one-command)) — point it at a
+   file *or a whole folder* (see the [folder map](#quick-start-get-a-working-result-in-60-seconds)):
    ```powershell
    .\scripts\Convert-TableauToPowerBI.ps1 -Source C:\exports\all-workbooks -Output C:\out
    ```
    > Zero setup? Use the bundled sample: `-Source .\sample\Superstore.twb`. On a fresh Windows box,
    > unblock scripts once per session: `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned`.
-4. **Open & finish in Power BI Desktop.** Open the `.pbip`, do a visual QA pass, and finish the
-   flagged 20% the report calls out — LOD/table-calc stubs, storage-mode choice, native-source rebind.
-5. **Publish to Fabric** ([Stage 3](#publish-into-fabric-stage-3), optional).
+   >
+   > **DirectLake is opt-in and needs the OneLake URL from step 5 first.** Once your warehouse is
+   > mirrored, run the estate script directly with the mirrored `Tables/` URL:
+   > `py -3.11 engine/skills/tableau-migration/scripts/migrate_estate.py -i <in> -o <out> --storage-mode directlake --directlake-url "https://onelake.dfs.fabric.microsoft.com/<ws>/<item>/Tables"`.
+4. 🧑 **You — Power BI Desktop.** **Open & finish** — open the `.pbip`, do a visual QA pass, and finish
+   the flagged 20% the report calls out (LOD/table-calc stubs, storage-mode choice, native-source rebind).
+5. 🧑 **You — Fabric portal (one-time, DirectLake only).** **Provision the destination** — create the
+   workspace + Lakehouse and **mirror** your warehouse into OneLake as Delta
+   ([which mirrored source to pick](#directlake-into-onelake--who-does-what)). Skip this for
+   Import/DirectQuery. This is the manual hand-off the tool deliberately does **not** do for you.
+6. 🤖 **The tool — Fabric REST API.** **Publish to Fabric** ([Stage 3](#publish-into-fabric-stage-3),
+   optional):
    ```powershell
    az login
    # edit fabric-deploy.json -> set "workspace"
    py -3.11 engine/skills/tableau-migration/scripts/deploy_to_fabric.py --config fabric-deploy.json
    ```
-   Pushes each model + report into your workspace (add `--dry-run` to preview), then set
-   credentials in the Fabric portal and refresh.
+   Pushes each model + report into your workspace over REST (add `--dry-run` to preview first).
+7. 🧑 **You — Fabric portal**, then 🤖 **refresh.** **Set the datasource credentials** in the portal
+   (the security boundary the tool never crosses), then trigger the refresh (`"refresh": true` /
+   `--refresh`) to go live.
 
 > **The report is automatic.** Every convert run writes `migration-report.html` beside
 > `report.json` in the output folder — an estate-wide, offline, no-JavaScript view of
@@ -588,6 +602,7 @@ Desktop, no secrets in any file.
 | Emit **DirectLake** TMDL, bound to the OneLake `Tables/` URL you supply (`--directlake-url`) | ✅ Ships today (opt-in) |
 | Provision the workspace + Lakehouse, and land / mirror your data as Delta | **You** — documented prerequisite (Step 0 above); the tool emits the materialization SQL + a mirror/shortcut manifest to guide it |
 | Fully hands-off infra (tool auto-creates the Lakehouse & copies your data) | By design **not** automated (see below) |
+| Set up **CI/CD** — Fabric **Git integration** or **deployment pipelines** | **You** — the tool *publishes* items via the Fabric **REST API** and emits Git-ready `.pbip`; wiring that into a CI/CD pipeline is yours. The accelerator is a publish **building block**, not a CI/CD system. |
 
 > **Credentials stay manual — by design.** The script binds items and refreshes, but it
 > **never enters datasource credentials**. Set the connection in the Fabric portal before
