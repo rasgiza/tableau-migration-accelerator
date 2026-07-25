@@ -180,6 +180,16 @@ _DIFFICULTY_CLASS = {"Low": "ok", "Moderate": "warn", "High": "warn", "Very High
 _IMPACT_CLASS = {"Low": "ok", "Medium": "warn", "High": "bad"}
 _IMPACT_ORDER = {"High": 0, "Medium": 1, "Low": 2}
 
+# Per-visual rebuild fidelity: (badge class, human label) for each honest four-state tier, plus a
+# worst-first sort order. Keys are the ``tier`` values emitted by ``migrate_estate._fidelity_tier``.
+_FIDELITY_TIER = {
+    "rebuilt": ("ok", "Faithful"),
+    "rebuilt_with_deferrals": ("warn", "Safe deferral"),
+    "degraded": ("bad", "Degraded"),
+    "empty": ("bad", "Unsupported"),
+}
+_FIDELITY_ORDER = {"degraded": 0, "empty": 1, "rebuilt_with_deferrals": 2, "rebuilt": 3}
+
 
 def _render_assessment(report: Dict[str, Any]) -> str:
     """Pre-migration sizing: surface area, complexity/difficulty, dead content, per-calc impact.
@@ -327,6 +337,81 @@ def _render_assessment(report: Dict[str, Any]) -> str:
         "workbook&rsquo;s own grammar &mdash; the scope, not a guess.</p>"
         "%s%s%s%s%s%s</section>"
     ) % (kpi_band, scorecard, formula_note, wb_table, comp_html, dead_html)
+
+
+def _render_visual_fidelity(report: Dict[str, Any]) -> str:
+    """Per-visual rebuild fidelity: how faithfully each Tableau worksheet came out in Power BI.
+
+    Reads each workbook's ``viz_fidelity`` list (attached by :mod:`migrate_estate`) -- one record
+    per worksheet ``{worksheet, visual_type, status, reason, tier}``. ``tier`` is the honest
+    four-state verdict (``rebuilt`` | ``rebuilt_with_deferrals`` | ``degraded`` | ``empty``). The
+    verdicts are STRUCTURAL -- derived from chart family + field bindings, never a pixel comparison
+    -- and the section says so plainly. Returns ``""`` when no workbook carries a viz-fidelity record
+    (so an older ``report.json`` or a datasource-only run omits the section entirely).
+    """
+    rows = []  # (sort_order, tier, workbook_name, record)
+    counts = {"rebuilt": 0, "rebuilt_with_deferrals": 0, "degraded": 0, "empty": 0}
+    for w in report.get("workbooks") or []:
+        wname = (w or {}).get("name") or "(workbook)"
+        for rec in (w or {}).get("viz_fidelity") or []:
+            tier = rec.get("tier")
+            if tier not in _FIDELITY_TIER:
+                # Older report.json without the additive tier -> fall back to the coarse status.
+                tier = "rebuilt" if str(rec.get("status")).lower() == "rebuilt" else "degraded"
+            counts[tier] = counts.get(tier, 0) + 1
+            rows.append((_FIDELITY_ORDER.get(tier, 9), tier, wname, rec))
+    if not rows:
+        return ""
+
+    total = len(rows)
+    # --- rollup KPI band ------------------------------------------------------------------
+    cards = [
+        _kpi_card("Views assessed", str(total),
+                  "%s faithful rebuild rate" % _pct(counts["rebuilt"], total)),
+        _kpi_card("Faithful", str(counts["rebuilt"]), "exact chart family + fields"),
+        _kpi_card("Safe deferrals", str(counts["rebuilt_with_deferrals"]),
+                  "renders minus a known fail-closed feature"),
+        _kpi_card("Degraded", str(counts["degraded"]), "material fidelity loss"),
+        _kpi_card("Unsupported", str(counts["empty"]), "no faithful visual emitted"),
+    ]
+    kpi_band = '<div class="kpis">%s</div>' % "".join(cards)
+
+    # --- per-visual table (worst first) ---------------------------------------------------
+    rows.sort(key=lambda t: (t[0], t[2], str(t[3].get("worksheet") or "")))
+    body = "".join(
+        "<tr><td>%s</td><td>%s</td><td>%s</td>"
+        '<td><span class="badge %s">%s</span></td>'
+        '<td class="reason">%s</td></tr>'
+        % (
+            _esc(wname),
+            _esc(rec.get("worksheet") or "\u2014"),
+            _esc(rec.get("visual_type") or "\u2014"),
+            _FIDELITY_TIER[tier][0], _esc(_FIDELITY_TIER[tier][1]),
+            _esc(rec.get("reason") or ""),
+        )
+        for _order, tier, wname, rec in rows
+    )
+    table = (
+        '<table class="grid"><thead><tr>'
+        "<th>Workbook</th><th>Worksheet</th><th>Chart type</th>"
+        "<th>Verdict</th><th>Note</th>"
+        "</tr></thead><tbody>%s</tbody></table>" % body
+    )
+
+    note = (
+        '<p class="note muted">Verdicts are <strong>structural</strong> &mdash; derived from chart '
+        'family and field bindings, not a pixel-by-pixel image comparison. <em>Safe deferral</em> '
+        'means the view renders minus a documented fail-closed feature (a dropped aggregate filter, '
+        'a date-grain approximation, or a default palette). Open any <em>Degraded</em> or '
+        '<em>Unsupported</em> view in Power BI Desktop to confirm before sign-off.</p>'
+    )
+
+    return (
+        '<section id="visual-fidelity"><h2>Visual fidelity &mdash; how faithfully each view rebuilt'
+        '</h2><p class="muted">One verdict per Tableau worksheet, worst first &mdash; the honest '
+        "rebuild quality behind the coverage numbers.</p>"
+        "%s%s%s</section>"
+    ) % (kpi_band, table, note)
 
 
 def _render_signoff_table(report: Dict[str, Any]) -> str:
@@ -1116,6 +1201,7 @@ def render_report_html(report: Dict[str, Any]) -> str:
         _render_outcome_summary(report),
         _render_kpis(report),
         _render_assessment(report),
+        _render_visual_fidelity(report),
         _render_copilot_readiness(report),
         _render_signoff_table(report),
         _render_needs_review(report),

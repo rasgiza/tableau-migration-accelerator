@@ -466,3 +466,75 @@ def test_outcome_summary_ampersand_not_double_escaped():
     o = _outcome_html(h)
     assert "reports rebuilt &amp; bound" in o
     assert "&amp;amp;" not in o
+
+
+def _viz_fidelity_workbook():
+    return {
+        "name": "Superstore",
+        "viz_fidelity": [
+            {"worksheet": "Sales by Category", "visual_type": "column",
+             "status": "rebuilt", "reason": None, "tier": "rebuilt"},
+            {"worksheet": "Deferred Palette", "visual_type": "line",
+             "status": "rebuilt", "reason": "default palette", "tier": "rebuilt_with_deferrals"},
+            {"worksheet": "Broken Map", "visual_type": "map",
+             "status": "warned", "reason": "wrong chart type: rebuilt as a table",
+             "tier": "degraded"},
+            {"worksheet": "Gantt View", "visual_type": "unsupported",
+             "status": "warned", "reason": "manual attention required: unsupported visual type",
+             "tier": "empty"},
+        ],
+    }
+
+
+def test_visual_fidelity_section_renders_all_tiers():
+    h = mr.render_report_html(_minimal_report(workbooks=[_viz_fidelity_workbook()]))
+    assert 'id="visual-fidelity"' in h
+    assert "Visual fidelity" in h
+    # each honest verdict label is present
+    for label in ("Faithful", "Safe deferral", "Degraded", "Unsupported"):
+        assert label in h
+    # per-visual rows surface each worksheet + its reason
+    assert "Broken Map" in h
+    assert "wrong chart type: rebuilt as a table" in h
+    # the honest structural disclaimer (never claims a pixel comparison)
+    assert "structural" in h
+    assert "not a pixel-by-pixel image comparison" in h
+    # rollup rate is shown (1 faithful of 4 -> 25%)
+    assert "25%" in h
+
+
+def test_visual_fidelity_orders_worst_first():
+    # A degraded/unsupported view must sort ahead of a clean rebuild so the eye lands on risk first.
+    h = mr.render_report_html(_minimal_report(workbooks=[_viz_fidelity_workbook()]))
+    assert h.index("Broken Map") < h.index("Sales by Category")
+    assert h.index("Gantt View") < h.index("Sales by Category")
+
+
+def test_visual_fidelity_absent_without_records():
+    # A datasource-only run (no workbook viz_fidelity) omits the section entirely.
+    h = mr.render_report_html(_minimal_report())
+    assert 'id="visual-fidelity"' not in h
+    assert "Visual fidelity" not in h
+
+
+def test_visual_fidelity_reason_is_html_escaped():
+    wb = _viz_fidelity_workbook()
+    wb["viz_fidelity"][2]["reason"] = "map <b>broke</b>"
+    h = mr.render_report_html(_minimal_report(workbooks=[wb]))
+    assert "map <b>broke</b>" not in h
+    assert "map &lt;b&gt;broke&lt;/b&gt;" in h
+
+
+def test_visual_fidelity_falls_back_when_tier_missing():
+    # An older report.json without the additive 'tier' still classifies from the coarse 'status'.
+    wb = {
+        "name": "Legacy",
+        "viz_fidelity": [
+            {"worksheet": "Clean", "visual_type": "bar", "status": "rebuilt", "reason": None},
+            {"worksheet": "Flagged", "visual_type": "map", "status": "warned",
+             "reason": "manual attention required"},
+        ],
+    }
+    h = mr.render_report_html(_minimal_report(workbooks=[wb]))
+    assert 'id="visual-fidelity"' in h
+    assert "Faithful" in h and "Degraded" in h
