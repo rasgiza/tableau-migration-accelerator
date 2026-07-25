@@ -121,6 +121,14 @@ def test_simple_surface_area_and_orphaned_worksheet():
     assert a["complexity"]["bucket"] == "Simple"
 
 
+def test_dashboard_map_records_per_dashboard_worksheet_membership():
+    a = A.assess_workbook(_SIMPLE)
+    dm = a["dashboard_map"]
+    assert dm == [{"name": "DB", "worksheets": ["Used"]}]
+    # An empty assessment still exposes the key (never a KeyError downstream).
+    assert A.assess_workbook("")["dashboard_map"] == []
+
+
 def test_unused_field_detection_is_conservative():
     a = A.assess_workbook(_RICH)
     unused_ids = {u["id"] for u in a["unused_fields"]}

@@ -398,6 +398,55 @@ def _render_visual_fidelity(report: Dict[str, Any]) -> str:
         "</tr></thead><tbody>%s</tbody></table>" % body
     )
 
+    # --- dashboard rollup: worst verdict among the views on each dashboard ------------------
+    # Crosses each workbook's dashboard membership (assessment.dashboard_map) with its per-visual
+    # verdicts so a customer sees which *dashboards* they demo carry risk, not just which sheets.
+    dash_rows = []
+    for w in report.get("workbooks") or []:
+        wname = (w or {}).get("name") or "(workbook)"
+        dmap = ((w or {}).get("assessment") or {}).get("dashboard_map") or []
+        if not dmap:
+            continue
+        by_ws = {}
+        for rec in (w or {}).get("viz_fidelity") or []:
+            t = rec.get("tier")
+            if t not in _FIDELITY_TIER:
+                t = "rebuilt" if str(rec.get("status")).lower() == "rebuilt" else "degraded"
+            by_ws[rec.get("worksheet")] = t
+        for d in dmap:
+            tiers = [by_ws[m] for m in (d.get("worksheets") or []) if m in by_ws]
+            if not tiers:
+                continue
+            dcounts = {}
+            for t in tiers:
+                dcounts[t] = dcounts.get(t, 0) + 1
+            worst = min(tiers, key=lambda t: _FIDELITY_ORDER.get(t, 9))
+            breakdown = " \u00b7 ".join(
+                "%d %s" % (dcounts[t], _FIDELITY_TIER[t][1])
+                for t in ("degraded", "empty", "rebuilt_with_deferrals", "rebuilt")
+                if dcounts.get(t))
+            dash_rows.append((_FIDELITY_ORDER.get(worst, 9), d.get("name") or "(dashboard)",
+                              wname, len(tiers), worst, breakdown))
+    dash_html = ""
+    if dash_rows:
+        dash_rows.sort(key=lambda r: (r[0], r[2], r[1]))
+        dbody = "".join(
+            "<tr><td>%s</td><td>%s</td><td>%s</td>"
+            '<td><span class="badge %s">%s</span></td>'
+            '<td class="reason">%s</td></tr>'
+            % (_esc(dname), _esc(wname), _esc(nviews),
+               _FIDELITY_TIER[worst][0], _esc(_FIDELITY_TIER[worst][1]), _esc(breakdown))
+            for _o, dname, wname, nviews, worst, breakdown in dash_rows
+        )
+        dash_html = (
+            '<div class="ds-rationale">Dashboard fidelity '
+            '<span class="muted">&mdash; the worst verdict among the views on each dashboard '
+            '(the risk in what you actually demo)</span></div>'
+            '<table class="grid"><thead><tr>'
+            "<th>Dashboard</th><th>Workbook</th><th>Views</th><th>Worst verdict</th><th>Breakdown</th>"
+            "</tr></thead><tbody>%s</tbody></table>" % dbody
+        )
+
     note = (
         '<p class="note muted">Verdicts are <strong>structural</strong> &mdash; derived from chart '
         'family and field bindings, not a pixel-by-pixel image comparison. <em>Safe deferral</em> '
@@ -410,8 +459,8 @@ def _render_visual_fidelity(report: Dict[str, Any]) -> str:
         '<section id="visual-fidelity"><h2>Visual fidelity &mdash; how faithfully each view rebuilt'
         '</h2><p class="muted">One verdict per Tableau worksheet, worst first &mdash; the honest '
         "rebuild quality behind the coverage numbers.</p>"
-        "%s%s%s</section>"
-    ) % (kpi_band, table, note)
+        "%s%s%s%s</section>"
+    ) % (kpi_band, dash_html, table, note)
 
 
 def _render_signoff_table(report: Dict[str, Any]) -> str:
@@ -944,6 +993,15 @@ details.cat table.grid th{background:var(--bg)}.dl-meta{color:var(--muted);font-
 .outcome-col .n{display:inline-block;min-width:34px;font-weight:600;font-variant-numeric:tabular-nums}
 .outcome-col a{color:var(--accent);text-decoration:none}
 .outcome-col a:hover{text-decoration:underline}
+.actions{list-style:none;margin:8px 0 0;padding:0}
+.actions li{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:var(--card)}
+.actions .rank{flex:0 0 auto;width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center}
+.actions .n{flex:0 0 auto;min-width:40px;font-weight:700;font-variant-numeric:tabular-nums;text-align:right}
+.actions .act-body{flex:1}
+.actions .act-title{font-weight:600;font-size:14px}
+.actions .act-title a{color:var(--accent);text-decoration:none}
+.actions .act-title a:hover{text-decoration:underline}
+.actions .act-detail{font-size:12px;margin-top:2px}
 footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
 """
 
@@ -1193,12 +1251,98 @@ def _render_outcome_summary(report: Dict[str, Any]) -> str:
     ) % grid
 
 
+def _render_action_plan(report: Dict[str, Any]) -> str:
+    """A prioritized **Start here** worklist: the highest-leverage next actions, ranked.
+
+    Pure consumer of facts already in ``report.json`` -- it never estimates or invents work. Each
+    action appears only when its universe is non-empty, is ordered by what a human should do first
+    (the storage-mode gate, then visible breakage, then correctness, then deployment, then cleanup),
+    carries the exact count, and deep-links to the section that itemises it. Returns ``""`` for a
+    fully clean run (nothing to do).
+    """
+    s = report.get("summary") or {}
+    dod = report.get("definition_of_done") or {}
+
+    broken = 0
+    for w in report.get("workbooks") or []:
+        for rec in (w or {}).get("viz_fidelity") or []:
+            t = rec.get("tier")
+            if t not in _FIDELITY_TIER:
+                t = "rebuilt" if str(rec.get("status")).lower() == "rebuilt" else "degraded"
+            if t in ("degraded", "empty"):
+                broken += 1
+    needs_review = _as_int(s.get("workbook_calcs_needs_review")) or sum(
+        len((wb.get("model_translation_handoff") or {}).get("needs_review") or [])
+        for wb in report.get("workbooks") or [])
+    stubbed = _as_int(s.get("measures_stubbed")) + _as_int(s.get("calc_columns_stubbed"))
+    followups = len(_dedup_followups(report))
+    a = report.get("assessment") or {}
+    dead = _as_int(a.get("unused_fields_total")) + _as_int(a.get("orphaned_worksheets_total"))
+    gate_open = (dod.get("applicable", True) and _status_class(dod.get("status")) != "ok"
+                 and _as_int(dod.get("workbooks_total")) > 0)
+    unbound = _as_int(dod.get("reports_warned")) + _as_int(dod.get("reports_failed"))
+
+    # (count, plain-text title [escaped], detail HTML [trusted, inserted raw], anchor)
+    actions = []
+    if gate_open:
+        actions.append((
+            unbound or "\u2014", "Make the storage-mode call, then finish binding",
+            "Decide Import vs DirectLake / DirectQuery for the flagged workbook(s) &mdash; the one "
+            "thing the tool refuses to guess. Everything downstream unblocks once this is set.",
+            None))
+    if broken:
+        actions.append((
+            broken, "Rebuild the views that did not survive the automatic rebuild",
+            "Worksheets that came out <em>Degraded</em> or <em>Unsupported</em> &mdash; open each in "
+            "Power BI Desktop and rebuild by hand.", "visual-fidelity"))
+    if needs_review:
+        actions.append((
+            needs_review, "Finish the calculations flagged for manual DAX",
+            "Recognisable but not auto-translatable (LOD, table calcs, unsupported functions). Each "
+            "row carries its original formula and category guidance.", "needs-review"))
+    if stubbed:
+        actions.append((
+            stubbed, "Replace the stubbed model measures and columns",
+            "Inert placeholders that keep the model valid but return no value until you author the "
+            "DAX.", None))
+    if followups:
+        actions.append((
+            followups, "Complete the connection and deployment follow-ups",
+            "Credentials, gateways, and DirectLake landing steps the model needs before it refreshes "
+            "in Fabric.", "followups"))
+    if dead:
+        actions.append((
+            dead, "Review the dead-content candidates before carrying them over",
+            "Orphaned worksheets and apparently-unused fields. Conservative hints &mdash; "
+            "<strong>verify before removing</strong>, never bulk-delete.", "assessment"))
+    if not actions:
+        return ""
+
+    items = []
+    for i, (count, title, detail, anchor) in enumerate(actions, 1):
+        title_html = _esc(title)
+        if anchor:
+            title_html = '<a href="#%s">%s</a>' % (_esc(anchor), title_html)
+        items.append(
+            '<li><span class="rank">%d</span><span class="n">%s</span>'
+            '<div class="act-body"><div class="act-title">%s</div>'
+            '<div class="muted act-detail">%s</div></div></li>'
+            % (i, _esc(count), title_html, detail))
+    return (
+        '<section id="start-here"><h2>Start here &mdash; your prioritized next actions</h2>'
+        '<p class="muted">Ranked from this run&rsquo;s own facts &mdash; work them top-down. Each '
+        'item links to the section that lists the specifics. Nothing here is estimated.</p>'
+        '<ol class="actions">%s</ol></section>'
+    ) % "".join(items)
+
+
 def render_report_html(report: Dict[str, Any]) -> str:
     """Build the full self-contained HTML document string from a parsed ``report.json`` dict."""
     parts = [
         _render_header(report),
         _render_dod_banner(report),
         _render_outcome_summary(report),
+        _render_action_plan(report),
         _render_kpis(report),
         _render_assessment(report),
         _render_visual_fidelity(report),

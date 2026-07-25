@@ -538,3 +538,93 @@ def test_visual_fidelity_falls_back_when_tier_missing():
     h = mr.render_report_html(_minimal_report(workbooks=[wb]))
     assert 'id="visual-fidelity"' in h
     assert "Faithful" in h and "Degraded" in h
+
+
+def test_dashboard_fidelity_rollup_shows_worst_verdict_per_dashboard():
+    wb = {
+        "name": "Superstore",
+        "assessment": {
+            "dashboard_map": [
+                {"name": "Executive", "worksheets": ["Sales by Category", "Broken Map"]},
+                {"name": "Trends", "worksheets": ["Sales by Category"]},
+            ],
+        },
+        "viz_fidelity": [
+            {"worksheet": "Sales by Category", "visual_type": "column",
+             "status": "rebuilt", "reason": None, "tier": "rebuilt"},
+            {"worksheet": "Broken Map", "visual_type": "map", "status": "warned",
+             "reason": "wrong chart type", "tier": "degraded"},
+        ],
+    }
+    h = mr.render_report_html(_minimal_report(workbooks=[wb]))
+    assert "Dashboard fidelity" in h
+    # 'Executive' carries the degraded map -> worst verdict Degraded; 'Trends' is all-faithful.
+    assert "Executive" in h and "Trends" in h
+    # the dashboard carrying breakage sorts ahead of the clean one
+    assert h.index("Executive") < h.index("Trends")
+
+
+def test_dashboard_fidelity_rollup_absent_without_dashboard_map():
+    # A workbook with per-visual fidelity but no dashboard_map (older report.json) still renders the
+    # per-visual table but no dashboard rollup.
+    h = mr.render_report_html(_minimal_report(workbooks=[_viz_fidelity_workbook()]))
+    assert 'id="visual-fidelity"' in h
+    assert "Dashboard fidelity" not in h
+
+
+def _clean_report():
+    """A run with nothing left to do: everything bound, no review/stub/follow-up/dead content."""
+    return _minimal_report(
+        datasources=[], workbooks=[],
+        summary={
+            "datasources_migrated": 1, "datasources_total": 1,
+            "datasources_partial": 0, "datasources_fallback": 0,
+            "measures_translated": 4, "measures_total": 4, "measures_stubbed": 0,
+            "calc_columns_translated": 0, "calc_columns_total": 0, "calc_columns_stubbed": 0,
+            "workbook_calcs_translated": 10, "workbook_calcs_total": 10,
+            "workbook_calcs_needs_review": 0,
+            "visuals_rebuilt": 5, "visuals_warned": 0,
+            "workbooks_viz_built": 1, "workbooks_total": 1, "workbooks_viz_error": 0,
+        },
+        definition_of_done={
+            "applicable": True, "status": "pass",
+            "reports_bound": 1, "reports_warned": 0, "reports_failed": 0,
+            "workbooks_total": 1, "workbooks": [],
+        },
+    )
+
+
+def test_action_plan_ranks_prioritized_actions_and_links():
+    wb = {
+        "name": "Superstore",
+        "viz_fidelity": [
+            {"worksheet": "Broken Map", "visual_type": "map", "status": "warned",
+             "reason": "wrong chart type", "tier": "degraded"},
+        ],
+    }
+    h = mr.render_report_html(_minimal_report(workbooks=[wb]))
+    assert 'id="start-here"' in h
+    assert "Start here" in h
+    # the storage-mode gate (definition of done = failed) is action #1, ahead of everything else
+    assert "Make the storage-mode call" in h
+    assert h.index("Make the storage-mode call") < h.index("Rebuild the views")
+    assert h.index("Rebuild the views") < h.index("Finish the calculations")
+    # actions deep-link to the sections that itemise them
+    assert 'href="#visual-fidelity"' in h
+    assert 'href="#needs-review"' in h
+    assert 'href="#followups"' in h
+
+
+def test_action_plan_absent_on_a_clean_run():
+    h = mr.render_report_html(_clean_report())
+    assert 'id="start-here"' not in h
+    assert "Start here" not in h
+
+
+def test_action_plan_detail_is_trusted_markup_not_double_escaped():
+    # Detail strings carry intentional inline markup (&mdash;) and must render, not double-escape.
+    h = mr.render_report_html(_minimal_report(workbooks=[]))
+    plan = h.split('id="start-here"')[-1].split("</section>")[0]
+    assert "&mdash;" in plan          # the real entity survives
+    assert "&amp;mdash;" not in plan  # never double-escaped
+

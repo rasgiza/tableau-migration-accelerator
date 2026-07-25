@@ -114,18 +114,30 @@ def assess_workbook(xml_text):
     db_parent = root.find("dashboards")
     dashboards = []
     zone_names = set()
+    dashboard_zones = []  # (dashboard_name, set_of_zone_names on it)
     if db_parent is not None:
         for d in db_parent.findall("dashboard"):
-            if d.get("name"):
-                dashboards.append(d.get("name"))
+            dname = d.get("name")
+            if dname:
+                dashboards.append(dname)
             # Zones nest arbitrarily (containers within containers); a worksheet is placed via
             # a zone whose @name is the worksheet name. Walk every descendant zone.
+            zones_here = set()
             for z in d.iter("zone"):
                 zn = z.get("name")
                 if zn:
                     zone_names.add(zn)
+                    zones_here.add(zn)
+            if dname:
+                dashboard_zones.append((dname, zones_here))
 
     orphaned = [w for w in worksheets if w not in zone_names]
+    # Per-dashboard worksheet membership (worksheet order preserved) so the report can roll
+    # per-visual fidelity up to the dashboards a customer actually demos.
+    dashboard_map = [
+        {"name": dn, "worksheets": [w for w in worksheets if w in zs]}
+        for dn, zs in dashboard_zones
+    ]
 
     # --- reference surface (worksheets + dashboards subtree text + calc formulas) ---------
     # A field counts as "used" if its id appears anywhere in the viz grammar or in any calc
@@ -315,6 +327,7 @@ def assess_workbook(xml_text):
         "unused_fields": unused,
         "orphaned_worksheets": orphaned,
         "components": components,
+        "dashboard_map": dashboard_map,
     }
 
 
@@ -347,6 +360,7 @@ def _clone_empty():
         "unused_fields": [],
         "orphaned_worksheets": [],
         "components": [],
+        "dashboard_map": [],
     }
 
 
