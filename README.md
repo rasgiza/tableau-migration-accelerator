@@ -81,7 +81,7 @@ flowchart LR
         USERS[Business users]
     end
     TAB --> FILES --> PARSE
-    WH -. Mirror/Shortcut .-> OL
+    WH -. you provision: Mirror/Shortcut .-> OL
     PBIP -->|Fabric REST CI/CD| SM
     OL -->|bind by table name| SM
     SM --> RPT --> USERS
@@ -193,11 +193,12 @@ one you run today**; stages 2–3 are the same tool pointed at the cloud.
 | **3 · Publish to Fabric** | `deploy_to_fabric.py --config fabric-deploy.json` | Model + report live in your Fabric workspace | `az login` + a Fabric workspace |
 
 > **Where DirectLake fits:** the target end-state is the semantic model bound in
-> **DirectLake mode over Delta tables in OneLake** — all-Fabric, no import copy. The
-> engine already emits DirectLake TMDL when you opt in; landing the data as Delta and
-> auto-binding the Lakehouse at deploy time is the active roadmap (see
-> [Publish into Fabric](#publish-into-fabric-stage-3) below). DirectLake is always
-> **opt-in** — the tool never silently picks it for you.
+> **DirectLake mode over Delta tables in OneLake** — all-Fabric, no import copy. The engine
+> emits DirectLake TMDL and binds it to the OneLake `Tables/` URL you supply, then deploys
+> over REST (all opt-in). You provision the workspace + Lakehouse and land your data as Delta
+> first — a documented prerequisite, not something the tool creates for you (see
+> [Publish into Fabric](#publish-into-fabric-stage-3) below). DirectLake is always **opt-in**
+> — the tool never silently picks it for you.
 
 **Run it end to end** — the exact commands, from a fresh clone. Each step links to its deeper
 section below; the outcomes are the table above.
@@ -581,29 +582,34 @@ Desktop, no secrets in any file.
 | Push semantic model + report to a workspace (REST, LRO) | ✅ Ships today |
 | Rebind report → model, trigger refresh | ✅ Ships today |
 | Friendly failure if `az` isn't installed / not signed in | ✅ Guarded, no raw traceback |
-| Emit **DirectLake** TMDL (opt-in) | ✅ Emitter exists |
-| Create the Lakehouse, land data as **Delta in OneLake**, auto-bind DirectLake | 🚧 Roadmap (see below) |
+| Emit **DirectLake** TMDL, bound to the OneLake `Tables/` URL you supply (`--directlake-url`) | ✅ Ships today (opt-in) |
+| Provision the workspace + Lakehouse, and land / mirror your data as Delta | **You** — documented prerequisite (Step 0 above); the tool emits the materialization SQL + a mirror/shortcut manifest to guide it |
+| Fully hands-off infra (tool auto-creates the Lakehouse & copies your data) | By design **not** automated (see below) |
 
 > **Credentials stay manual — by design.** The script binds items and refreshes, but it
 > **never enters datasource credentials**. Set the connection in the Fabric portal before
 > refreshing a DirectQuery/DirectLake model. A 401/403 on refresh means "go configure the
 > connection," not a bug.
 
-### The DirectLake-into-OneLake destination (roadmap)
+### DirectLake into OneLake — who does what
 
-The end-state is the migrated model bound in **DirectLake mode over Delta tables in
-OneLake**. It lands in three opt-in phases, each preserving clone-and-run (stdlib + REST
-+ az-token, no new `pip` deps):
+The end-state is the model bound in **DirectLake mode over Delta tables in OneLake** —
+all-Fabric, no import copy. Today this is a **provision-then-bind** flow: opt-in and
+clone-and-run (stdlib + REST + az-token, no new `pip` deps).
 
-1. **Select + emit** *(offline, testable now)* — opt-in `--storage-mode directlake`
-   stamps DirectLake TMDL with a Lakehouse **placeholder** and emits a "land these tables
-   as Delta" worklist. No Azure calls.
-2. **Deploy rail** — `deploy_to_fabric.py` ensures/creates a Lakehouse, resolves its SQL
-   endpoint, substitutes the placeholder, and binds the model.
-3. **Data landing** — extract/flat-file → load Delta into the Lakehouse; live warehouse →
-   create a shortcut (no copy).
+**You provision (once, in the Fabric portal or your own pipeline).** Create the workspace +
+**Lakehouse**, and land your data as Delta — **mirror** or **shortcut** a live warehouse (no
+copy), or load extract / flat-file tables. This is the documented **Step 0** prerequisite above;
+to guide it, the tool hands you the exact **materialization SQL** and a **mirror/shortcut
+manifest** so you know precisely which tables to land.
 
-DirectLake is always **opt-in**; storage mode remains a deliberate human decision, never
+**The tool automates (opt-in `--storage-mode directlake`).** It stamps DirectLake TMDL, binds it
+to the OneLake `Tables/` URL you pass via `--directlake-url` (substituting the placeholder), then
+`deploy_to_fabric.py` pushes the model + report to your workspace over REST.
+
+**Not automated — by design.** Having the tool *itself* create the Lakehouse or copy/mirror your
+data hands-off is a deliberate boundary: a migration tool shouldn't silently spin up
+capacity-consuming items or duplicate your data. Storage mode stays a human decision, never
 auto-guessed.
 
 ## Provenance & honesty note

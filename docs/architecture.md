@@ -43,7 +43,7 @@ flowchart LR
         USERS[Business users]
     end
     TAB --> FILES
-    WH -. Mirror/Shortcut .-> OL
+    WH -. you provision: Mirror/Shortcut .-> OL
     PBIP -->|Fabric REST CI/CD| SM
     OL -->|bind by table name| SM
     SM --> RPT --> USERS
