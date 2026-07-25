@@ -211,8 +211,8 @@ deeper section, and the outcomes are the table above.
    needs (no `pip install`, no internet, no Azure). On **macOS/Linux**, install **PowerShell 7** for
    the wrapper, or call `migrate_estate.py` directly.
    ```powershell
-   git clone <repo-url>
-   cd tableau-accelerator
+   git clone https://github.com/rasgiza/tableau-migration-accelerator.git
+   cd tableau-migration-accelerator
    ```
 2. 🧑 **You — Tableau (UI / REST / `tabcmd`).** **Get your files out**
    ([Step 0](#step-0--get-your-tableau-files-out-and-staging-a-large-estate)) — export the
