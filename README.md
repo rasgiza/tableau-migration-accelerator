@@ -21,8 +21,7 @@ A map of this README and the deep-dive docs, so anyone can jump straight to what
 **Start here**
 - [Big picture (end-to-end architecture)](#big-picture-end-to-end)
 - [Quick start (working result in ~60 seconds)](#quick-start-get-a-working-result-in-60-seconds)
-- [The journey at a glance](#the-journey-at-a-glance) — the 3 stages, one table
-- [Clone-to-completion in 5 steps](#clone-to-completion-in-5-steps) — fresh clone → openable model
+- [The journey at a glance](#the-journey-at-a-glance) — the 3 stages + the end-to-end commands
 - [Step 0 — Get your Tableau files out](#step-0--get-your-tableau-files-out-and-staging-a-large-estate)
 - [Convert a report — one command](#convert-a-tableau-report-to-a-power-bi-semantic-model-one-command)
 
@@ -189,7 +188,7 @@ one you run today**; stages 2–3 are the same tool pointed at the cloud.
 
 | Stage | You run | You get | Needs |
 |---|---|---|---|
-| **1 · Convert** (offline) | `Convert-TableauToPowerBI.ps1 -Source <file>` | Typed TMDL model + calc→DAX + openable `.pbip` | Python 3.11 only — no internet, no Azure |
+| **1 · Convert** (offline) | `Convert-TableauToPowerBI.ps1 -Source <file-or-folder>` | Typed TMDL model + calc→DAX + openable `.pbip` + `migration-report.html` | Python 3.11 only — no internet, no Azure |
 | **2 · Open & finish** | Open the `.pbip` in Power BI Desktop | Visual QA + finish the flagged 20% (LODs, table calcs, storage mode) | Power BI Desktop |
 | **3 · Publish to Fabric** | `deploy_to_fabric.py --config fabric-deploy.json` | Model + report live in your Fabric workspace | `az login` + a Fabric workspace |
 
@@ -200,36 +199,28 @@ one you run today**; stages 2–3 are the same tool pointed at the cloud.
 > [Publish into Fabric](#publish-into-fabric-stage-3) below). DirectLake is always
 > **opt-in** — the tool never silently picks it for you.
 
-## Clone-to-completion in 5 steps
+**Run it end to end** — the exact commands, from a fresh clone. Each step links to its deeper
+section below; the outcomes are the table above.
 
-The whole arc, from a fresh `git clone` to an openable model + a shareable report.
-Each step links to the deeper section below.
-
-1. **Clone + check prerequisites.** You need **Python 3.11+** — nothing else for the
-   offline core (no `pip install`, no internet, no Azure). On **macOS/Linux** install
-   **PowerShell 7** to use the wrapper, or call `migrate_estate.py` directly.
+1. **Clone + check prerequisites.** **Python 3.11+** is all you need for the offline core (no
+   `pip install`, no internet, no Azure). On **macOS/Linux**, install **PowerShell 7** to use the
+   wrapper, or call `migrate_estate.py` directly.
    ```powershell
    git clone <repo-url>
    cd tableau-accelerator
    ```
 2. **Get your Tableau files out** ([Step 0](#step-0--get-your-tableau-files-out-and-staging-a-large-estate)).
-   Export the `.twb`/`.twbx` **blueprints** (not the data) from Tableau into a folder —
-   by hand for a few, or via REST API / `tabcmd` / Content Migration Tool for 150+.
+   Export the `.twb`/`.twbx` **blueprints** (not the data) into a folder — by hand for a few, or via
+   REST API / `tabcmd` / Content Migration Tool for 150+.
 3. **Convert — offline** ([one command](#convert-a-tableau-report-to-a-power-bi-semantic-model-one-command)).
-   Point the tool at a file *or the whole folder*:
+   Point the tool at a file *or a whole folder* (see the [folder map](#quick-start-get-a-working-result-in-60-seconds) for where files go):
    ```powershell
    .\scripts\Convert-TableauToPowerBI.ps1 -Source C:\exports\all-workbooks -Output C:\out
    ```
-   You get, per workbook: a typed **TMDL** model, safe calc→**DAX** (originals kept), an
-   openable **`.pbip`**, and — for the whole run — a self-contained
-   **`migration-report.html`** you can open or hand to the customer.
-   > First run with **zero setup**? Use the bundled sample:
-   > `.\scripts\Convert-TableauToPowerBI.ps1 -Source .\sample\Superstore.twb`
-   > (On a fresh Windows box, unblock scripts once per session:
-   > `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned`.)
-4. **Open & finish in Power BI Desktop.** Open the `.pbip`, do a visual QA pass, and
-   finish the flagged 20% the report calls out — LOD/table-calc stubs, storage-mode
-   choice, native-source rebind.
+   > Zero setup? Use the bundled sample: `-Source .\sample\Superstore.twb`. On a fresh Windows box,
+   > unblock scripts once per session: `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned`.
+4. **Open & finish in Power BI Desktop.** Open the `.pbip`, do a visual QA pass, and finish the
+   flagged 20% the report calls out — LOD/table-calc stubs, storage-mode choice, native-source rebind.
 5. **Publish to Fabric** ([Stage 3](#publish-into-fabric-stage-3), optional).
    ```powershell
    az login
@@ -237,8 +228,7 @@ Each step links to the deeper section below.
    py -3.11 engine/skills/tableau-migration/scripts/deploy_to_fabric.py --config fabric-deploy.json
    ```
    Pushes each model + report into your workspace (add `--dry-run` to preview), then set
-   credentials in the Fabric portal and refresh. DirectLake-into-OneLake is the opt-in
-   roadmap end-state.
+   credentials in the Fabric portal and refresh.
 
 > **The report is automatic.** Every convert run writes `migration-report.html` beside
 > `report.json` in the output folder — an estate-wide, offline, no-JavaScript view of
