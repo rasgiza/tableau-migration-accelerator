@@ -558,6 +558,9 @@ Desktop, no secrets in any file.
    target, a **Lakehouse** inside it too (that lakehouse's OneLake `Tables/` path is where the
    data lands and what the model points at). The script publishes *into* these; it does **not**
    create the workspace or lakehouse for you. (DirectQuery/Import need only the workspace.)
+   For DirectLake, the recommended way to land your warehouse data as Delta is **Fabric
+   Mirroring** — see [which mirrored source to pick](#directlake-into-onelake--who-does-what)
+   just below.
 1. **Sign in.** `az login` (the script uses your Azure CLI token by default — or pass
    `--token` / set `FABRIC_TOKEN` to skip the CLI entirely).
 2. **Point it at your workspace.** Open [`fabric-deploy.json`](fabric-deploy.json) and set
@@ -602,6 +605,24 @@ clone-and-run (stdlib + REST + az-token, no new `pip` deps).
 copy), or load extract / flat-file tables. This is the documented **Step 0** prerequisite above;
 to guide it, the tool hands you the exact **materialization SQL** and a **mirror/shortcut
 manifest** so you know precisely which tables to land.
+
+**How to mirror a live warehouse (the recommended DirectLake path).** In the Fabric portal,
+choose **+ New item → Mirrored database**, then pick the connector that matches **your** system of
+record ([full source list & tutorials](https://learn.microsoft.com/fabric/mirroring/overview)):
+
+| Your source | What to select | How it lands |
+|---|---|---|
+| Snowflake, Azure SQL DB, Azure SQL Managed Instance, Azure Database for PostgreSQL / MySQL, Oracle, Google BigQuery, SQL Server, Azure Cosmos DB | **Mirrored `<that source>`** (*database mirroring*) | Fabric replicates the tables into OneLake as **Delta**, near-real-time |
+| Azure Databricks (Unity Catalog) | **Mirrored Azure Databricks** (*metadata mirroring*) | Shortcuts in place — **no copy** |
+| Fabric SQL database | — | Mirrored to OneLake **automatically** |
+| Anything without a connector | **Open mirroring** | You land change data via the mirroring API / landing zone |
+
+Give it the connection + credentials, choose the **whole database or just the tables your
+workbooks use**, and create it. Fabric lands the Delta tables in OneLake and exposes a SQL
+analytics endpoint. Then point the accelerator at that data with `--directlake-url` — either the
+**mirrored database's** own OneLake `Tables/` path, or shortcut those tables into your **Lakehouse**
+and pass the Lakehouse path. A mirrored database's Delta tables are DirectLake-ready with no extra
+copy.
 
 **The tool automates (opt-in `--storage-mode directlake`).** It stamps DirectLake TMDL, binds it
 to the OneLake `Tables/` URL you pass via `--directlake-url` (substituting the placeholder), then
