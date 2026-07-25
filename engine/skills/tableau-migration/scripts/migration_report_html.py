@@ -175,6 +175,160 @@ def _render_kpis(report: Dict[str, Any]) -> str:
     return '<section><h2>Coverage</h2><div class="kpis">%s</div></section>' % "".join(cards)
 
 
+_COMPLEXITY_CLASS = {"Simple": "ok", "Moderate": "warn", "Complex": "bad"}
+_DIFFICULTY_CLASS = {"Low": "ok", "Moderate": "warn", "High": "warn", "Very High": "bad"}
+_IMPACT_CLASS = {"Low": "ok", "Medium": "warn", "High": "bad"}
+_IMPACT_ORDER = {"High": 0, "Medium": 1, "Low": 2}
+
+
+def _render_assessment(report: Dict[str, Any]) -> str:
+    """Pre-migration sizing: surface area, complexity/difficulty, dead content, per-calc impact.
+
+    Rendered from the estate-level ``report["assessment"]`` roll-up plus each workbook's own
+    ``assessment`` block (attached by :mod:`migrate_estate`). Every number is a deterministic
+    count of the workbook's own grammar -- the difficulty score is transparent arithmetic (its
+    formula is printed), never an opaque "AI" guess. Returns ``""`` when no assessment is present
+    (older ``report.json``) or nothing was parsed.
+    """
+    a = report.get("assessment") or {}
+    surf = a.get("surface_area") or {}
+    if not any(_as_int(v) for v in surf.values()):
+        return ""
+
+    # --- surface-area KPI band ------------------------------------------------------------
+    cards = [
+        _kpi_card("Worksheets", str(surf.get("worksheets", 0)),
+                  "%s on no dashboard" % a.get("orphaned_worksheets_total", 0)),
+        _kpi_card("Dashboards", str(surf.get("dashboards", 0))),
+        _kpi_card("Calculated fields", str(surf.get("calculations", 0)),
+                  "%s LOD \u00b7 %s table calc"
+                  % (surf.get("lod_expressions", 0), surf.get("table_calcs", 0))),
+        _kpi_card("Parameters", str(surf.get("parameters", 0))),
+        _kpi_card("Fields defined", str(surf.get("fields_defined", 0)),
+                  "%s appear unused" % a.get("unused_fields_total", 0)),
+    ]
+    kpi_band = '<div class="kpis">%s</div>' % "".join(cards)
+
+    # --- complexity + difficulty headline -------------------------------------------------
+    cplx = a.get("complexity") or {}
+    diff = a.get("difficulty") or {}
+    cplx_bucket = cplx.get("bucket") or "Simple"
+    diff_band = diff.get("band") or "Low"
+    scorecard = (
+        '<div class="scorecard">'
+        '<div class="score">'
+        '<div class="score-band"><span class="badge %s">%s</span></div>'
+        '<div class="score-label">Estate complexity '
+        '<span class="muted">(hardest workbook, 1&ndash;5 rubric)</span></div>'
+        '<div class="score-sub">score %s / 5</div>'
+        '</div>'
+        '<div class="score">'
+        '<div class="score-band"><span class="badge %s">%s</span></div>'
+        '<div class="score-label">Migration difficulty '
+        '<span class="muted">(hardest workbook, 0&ndash;100)</span></div>'
+        '<div class="score-sub">score %s / 100</div>'
+        '</div>'
+        '</div>'
+    ) % (
+        _COMPLEXITY_CLASS.get(cplx_bucket, "muted"), _esc(cplx_bucket), _esc(cplx.get("max_score", 1)),
+        _DIFFICULTY_CLASS.get(diff_band, "muted"), _esc(diff_band), _esc(diff.get("max_score", 0)),
+    )
+    formula = diff.get("formula") or ""
+    formula_note = (
+        '<p class="note muted">Difficulty is transparent arithmetic over the workbook&rsquo;s own '
+        'grammar &mdash; <code>%s</code> &mdash; not an opaque score. Complexity buckets follow the '
+        'documented 1&ndash;5 rubric (LOD &amp; table calcs dominate the manual-DAX tail).</p>'
+    ) % _esc(formula) if formula else ""
+
+    # --- per-workbook table ---------------------------------------------------------------
+    wbs = report.get("workbooks") or []
+    wb_rows = []
+    for w in wbs:
+        wa = (w or {}).get("assessment") or {}
+        if not wa:
+            continue
+        wc = wa.get("complexity") or {}
+        wd = wa.get("difficulty") or {}
+        wb_rows.append(
+            "<tr><td>%s</td>"
+            '<td><span class="badge %s">%s</span> <span class="muted">%s/5</span></td>'
+            '<td><span class="badge %s">%s</span> <span class="muted">%s/100</span></td>'
+            "<td>%s</td><td>%s</td></tr>"
+            % (
+                _esc(w.get("name") or "(workbook)"),
+                _COMPLEXITY_CLASS.get(wc.get("bucket"), "muted"),
+                _esc(wc.get("bucket") or "?"), _esc(wc.get("score", 1)),
+                _DIFFICULTY_CLASS.get(wd.get("band"), "muted"),
+                _esc(wd.get("band") or "?"), _esc(wd.get("score", 0)),
+                _esc(len(wa.get("unused_fields") or [])),
+                _esc(len(wa.get("orphaned_worksheets") or [])),
+            )
+        )
+    wb_table = (
+        '<table class="grid"><thead><tr>'
+        "<th>Workbook</th><th>Complexity</th><th>Difficulty</th>"
+        "<th>Unused fields</th><th>Orphaned worksheets</th>"
+        "</tr></thead><tbody>%s</tbody></table>" % "".join(wb_rows)
+    ) if wb_rows else ""
+
+    # --- per-component impact (High-impact first) -----------------------------------------
+    comp_rows = []
+    for w in wbs:
+        wa = (w or {}).get("assessment") or {}
+        wname = w.get("name") or "(workbook)"
+        for c in (wa.get("components") or []):
+            comp_rows.append((c.get("impact") or "Low", wname, c))
+    comp_rows.sort(key=lambda t: (_IMPACT_ORDER.get(t[0], 3), t[1]))
+    comp_html = ""
+    if comp_rows:
+        body = "".join(
+            "<tr><td>%s</td><td>%s</td><td>%s</td>"
+            '<td><span class="badge %s">%s</span></td></tr>'
+            % (_esc(wname), _esc(c.get("name")), _esc(c.get("kind")),
+               _IMPACT_CLASS.get(impact, "muted"), _esc(impact))
+            for impact, wname, c in comp_rows
+        )
+        comp_html = (
+            '<div class="ds-rationale">Per-calculation migration impact '
+            '<span class="muted">&mdash; High = manual DAX likely (LOD / table calc / custom SQL)'
+            '</span></div>'
+            '<table class="grid"><thead><tr>'
+            "<th>Workbook</th><th>Component</th><th>Kind</th><th>Impact</th>"
+            "</tr></thead><tbody>%s</tbody></table>" % body
+        )
+
+    # --- dead-content detail (verify-before-removing) -------------------------------------
+    dead_blocks = []
+    for w in wbs:
+        wa = (w or {}).get("assessment") or {}
+        orphans = wa.get("orphaned_worksheets") or []
+        unused = wa.get("unused_fields") or []
+        if not orphans and not unused:
+            continue
+        wname = _esc(w.get("name") or "(workbook)")
+        inner = ""
+        if orphans:
+            inner += "<div><strong>Orphaned worksheets:</strong> %s</div>" % _esc(", ".join(orphans))
+        if unused:
+            names = ", ".join(u.get("field") or u.get("id") or "" for u in unused)
+            inner += "<div><strong>Unused fields:</strong> %s</div>" % _esc(names)
+        dead_blocks.append("<div class=\"ds\"><div class=\"ds-name\">%s</div>%s</div>" % (wname, inner))
+    dead_html = ""
+    if dead_blocks:
+        dead_html = (
+            "<details class=\"cat\"><summary>Dead-content candidates "
+            "<span class=\"muted\">&mdash; verify before removing; not a deletion instruction"
+            "</span></summary>%s</details>" % "".join(dead_blocks)
+        )
+
+    return (
+        '<section id="assessment"><h2>Estate assessment &mdash; sizing before you commit</h2>'
+        '<p class="muted">Deterministic surface-area, complexity and dead-content scan of each '
+        "workbook&rsquo;s own grammar &mdash; the scope, not a guess.</p>"
+        "%s%s%s%s%s%s</section>"
+    ) % (kpi_band, scorecard, formula_note, wb_table, comp_html, dead_html)
+
+
 def _render_signoff_table(report: Dict[str, Any]) -> str:
     dod = report.get("definition_of_done") or {}
     rows = dod.get("workbooks") or []
@@ -653,6 +807,11 @@ font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 .kpi-value{font-size:22px;font-weight:600}
 .kpi-label{color:var(--muted);font-size:12px;margin-top:2px}
 .kpi-sub{color:var(--muted);font-size:11px;margin-top:6px}
+.scorecard{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px}
+.score{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.score-band .badge{font-size:13px;padding:3px 12px}
+.score-label{font-size:13px;margin-top:8px}
+.score-sub{color:var(--muted);font-size:11px;margin-top:2px}
 table.grid{border-collapse:collapse;width:100%;font-size:13px}
 table.grid th,table.grid td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
 table.grid th{background:var(--card);font-weight:600}
@@ -956,6 +1115,7 @@ def render_report_html(report: Dict[str, Any]) -> str:
         _render_dod_banner(report),
         _render_outcome_summary(report),
         _render_kpis(report),
+        _render_assessment(report),
         _render_copilot_readiness(report),
         _render_signoff_table(report),
         _render_needs_review(report),

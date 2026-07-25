@@ -65,6 +65,7 @@ try:  # works whether imported as a package or run with scripts/ on sys.path
     from .workbook_calc_usage import workbook_calc_usage
     from .migration_report_html import render_report_html
     from .copilot_readiness import score_copilot_readiness
+    from .workbook_assessment import assess_workbook, aggregate_assessment
     from . import fetch_tds as F
 except ImportError:
     from connection_to_m import (parse_tds, extract_bundled_flatfile, extract_calcs,
@@ -81,6 +82,7 @@ except ImportError:
     from workbook_calc_usage import workbook_calc_usage
     from migration_report_html import render_report_html
     from copilot_readiness import score_copilot_readiness
+    from workbook_assessment import assess_workbook, aggregate_assessment
     import fetch_tds as F
 
 
@@ -3311,11 +3313,21 @@ def migrate_estate(source, output_dir, *, viz_stage=None, pbip=True, rebind_plan
                                           approved_calc_dax=approved_calc_dax,
                                           copilot_ready=copilot_ready)
                   for ds_id in source.list_datasources()]
+    wb_ids = list(source.list_workbooks())
     wb_details = [migrate_workbook(source, write_to=output_dir, wb_id=wb_id, viz_stage=viz,
                                    approved_calc_dax=approved_calc_dax, viz_advice=viz_advice,
                                    pbip=pbip, ds_catalog=ds_catalog, used_folders=used_folders,
                                    second_compile=second_compile, authored=authored)
-                  for wb_id in source.list_workbooks()]
+                  for wb_id in wb_ids]
+    # Pre-migration assessment (read-only, additive): size each workbook's surface area,
+    # complexity, difficulty and dead-content candidates from its own ``.twb`` grammar so the
+    # report can show scope BEFORE the customer commits. Fail-closed per workbook -- a scan
+    # hiccup must never break a migration run or omit the workbook from ``wb_details``.
+    for wb_id, w in zip(wb_ids, wb_details):
+        try:
+            w["assessment"] = assess_workbook(source.read_workbook(wb_id))
+        except Exception:  # pragma: no cover - assessment is a convenience over the raw facts
+            pass
 
     summary = _summarize(ds_details, wb_details, viz is not None)
     fallbacks = [
@@ -3342,6 +3354,14 @@ def migrate_estate(source, output_dir, *, viz_stage=None, pbip=True, rebind_plan
     try:
         report["copilot_readiness"] = score_copilot_readiness(report)
     except Exception:  # pragma: no cover - scorecard is a convenience over the raw facts
+        pass
+
+    # Estate-level pre-migration assessment roll-up (read-only, additive). Sums the per-workbook
+    # surface area / dead-content and carries the hardest workbook's difficulty as the headline.
+    # Fail-closed: an aggregation hiccup leaves report.json valid without the block.
+    try:
+        report["assessment"] = aggregate_assessment(wb_details)
+    except Exception:  # pragma: no cover - roll-up is a convenience over the per-workbook facts
         pass
 
     with open(os.path.join(output_dir, "report.json"), "w", encoding="utf-8") as fh:
