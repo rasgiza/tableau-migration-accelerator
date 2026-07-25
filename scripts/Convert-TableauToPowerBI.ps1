@@ -182,7 +182,12 @@ if ($pbip) {
     Write-Host "  Open in Power BI Desktop:" -ForegroundColor White
     Write-Host "    $($pbip.FullName)" -ForegroundColor Yellow
 }
-Write-Host "  Migration report: $Output\report.json  (+ summary.md)" -ForegroundColor White
+$htmlReport = Join-Path $Output 'migration-report.html'
+if (Test-Path $htmlReport) {
+    Write-Host "  Open the migration report (double-click, opens in your browser):" -ForegroundColor White
+    Write-Host "    $htmlReport" -ForegroundColor Yellow
+}
+Write-Host "  Also: $Output\summary.md (human summary) and $Output\report.json (machine-readable)" -ForegroundColor White
 
 if ($buildExit -ne 0) {
     Write-Host "`n  Note: the definition-of-done gate flagged a human decision" -ForegroundColor Yellow

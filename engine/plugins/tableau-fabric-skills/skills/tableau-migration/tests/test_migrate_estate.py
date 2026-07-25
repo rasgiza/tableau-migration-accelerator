@@ -2621,6 +2621,8 @@ def test_cli_main_runs_offline(fixtures_dir, tmp_path, capsys):
     printed = capsys.readouterr().out
     assert "Datasources:" in printed
     assert "Bundle written to:" in printed
+    assert "Human summary (markdown):" in printed   # report location surfaced to the user
+    assert "Machine-readable facts:" in printed
     assert "Openable projects:" in printed  # pbip hint surfaced
     assert "Next step:" in printed          # stubbed-calc check-in surfaced (widget_sales stubs one)
 

@@ -138,7 +138,10 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 
 **What you get** in `.\out`: a typed **TMDL** semantic model, safe calc→**DAX** (originals kept
 as annotations), an openable **`.pbip`**, and a `report.json` + `summary.md`.
-**Open it:** double-click `out\pbip\Superstore\Superstore.pbip` in **Power BI Desktop**.
+**Open the model:** double-click `out\pbip\Superstore\Superstore.pbip` in **Power BI Desktop**.
+**Open the report:** double-click `out\migration-report.html` — it opens in your browser (an
+estate-wide sizing + fidelity view, no server needed). The run prints both paths when it finishes,
+so you never have to go hunting for them.
 
 > **Heads-up — the sample ends with `[FAIL] Definition of done` on purpose.** That is *not* a
 > bug: everything mechanical (schema, types, calc→DAX, PBIP) is done, and the run stops at the

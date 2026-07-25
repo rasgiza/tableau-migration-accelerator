@@ -4289,6 +4289,15 @@ def main(argv=None):
             f"{s['workbook_calcs_needs_review']} need review"
         )
     print(f"Bundle written to: {os.path.abspath(args.output)}")
+    # Point the user straight at the artifacts -- the report should never be a needle to hunt for
+    # in the output folder. The browser-openable HTML is the exec view (coverage + estate
+    # assessment); it is best-effort, so advertise it only when it was actually written.
+    out_abs = os.path.abspath(args.output)
+    html_path = os.path.join(out_abs, "migration-report.html")
+    if os.path.isfile(html_path):
+        print(f"  Open the report (double-click, opens in your browser):\n    {html_path}")
+    print(f"  Human summary (markdown): {os.path.join(out_abs, 'summary.md')}")
+    print(f"  Machine-readable facts:   {os.path.join(out_abs, 'report.json')}")
     if not args.no_pbip:
         print("Openable projects: pbip/<Name>/<Name>.pbip (double-click in Power BI Desktop)")
     if s.get("needs_review_total"):
