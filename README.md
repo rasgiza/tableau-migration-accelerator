@@ -26,6 +26,7 @@ A map of this README and the deep-dive docs, so anyone can jump straight to what
 - [Convert a report — one command](#convert-a-tableau-report-to-a-power-bi-semantic-model-one-command)
 
 **What you get & how it works**
+- [Opening the `.pbip` in Power BI Desktop](#opening-the-pbip-in-power-bi-desktop--prerequisites--troubleshooting) — prerequisites & the two most common open errors
 - [What's here](#whats-here) — the repo map (folders & files)
 - [The offline proof (what actually ran)](#the-offline-proof-what-actually-ran)
 - [What happens to my dashboards & visuals?](#what-happens-to-my-dashboards--visuals)
@@ -138,7 +139,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 
 **What you get** in `.\out`: a typed **TMDL** semantic model, safe calc→**DAX** (originals kept
 as annotations), an openable **`.pbip`**, and a `report.json` + `summary.md`.
-**Open the model:** double-click `out\pbip\Superstore\Superstore.pbip` in **Power BI Desktop**.
+**Open the model:** double-click `out\pbip\Superstore\Superstore.pbip` in **Power BI Desktop**
+(first time? see [prerequisites & troubleshooting](#opening-the-pbip-in-power-bi-desktop--prerequisites--troubleshooting) — a `.pbip` needs three preview features turned on).
 **Open the report:** double-click `out\migration-report.html` — it opens in your browser (an
 estate-wide sizing + fidelity view, no server needed). The run prints both paths when it finishes,
 so you never have to go hunting for them.
@@ -183,6 +185,41 @@ python3 engine/skills/tableau-migration/scripts/migrate_estate.py -i ./sample -o
 
 That's the whole offline loop. For bulk-exporting a real estate, publishing to Fabric, and the
 full walkthrough, keep reading.
+
+## Opening the `.pbip` in Power BI Desktop — prerequisites & troubleshooting
+
+The convert step is offline and always succeeds at producing files. **Opening those files is a
+separate step that happens inside Power BI Desktop**, and it has its own requirements. If the run
+finished but Desktop throws an error on open, it's almost always one of the two causes below — not
+a bad conversion.
+
+### Prerequisite — turn on the project preview features (one time)
+
+The engine emits the **modern PBIP layout**: a **TMDL** semantic model plus the **enhanced report
+format (PBIR)** (the `definition/pages/.../page.json` folders). Power BI Desktop only opens that
+format when it is **reasonably recent** (use a 2024 or newer build) **and** these three
+**Preview features** are enabled:
+
+1. **File → Options and settings → Options → Preview features**, tick:
+   - **Power BI Project (.pbip) save option**
+   - **Store semantic model using TMDL format**
+   - **Store reports using enhanced metadata format (PBIR)**
+2. Click **OK**, then **fully restart** Power BI Desktop (the features load at startup).
+3. Open the `.pbip` via **File → Open**, or double-click `…\pbip\<Name>\<Name>.pbip`.
+
+> If Desktop is older than ~2024, update it first — early builds cannot open PBIR reports at all.
+
+### The two errors people actually hit
+
+| What you see on open | Why | Fix |
+|---|---|---|
+| *"We couldn't open your report"* / *"unsupported / newer format"* / the `.Report` won't load | The **PBIR preview feature is off** or Desktop is too old for the enhanced report format | Enable the three preview features above and restart; update Desktop if it predates 2024 |
+| *"Can't connect"* / a **SQL Server** login, firewall, or timeout error — often the model opens, then fails loading data | The model is **DirectQuery bound to a placeholder (or real-but-uncredentialed) source**. The bundled sample points at `placeholder-store.database.windows.net` on purpose, because storage mode is [never auto-guessed](#how-does-it-handle-my-calculations-lod-expressions-parameters--custom-sql) | Point the model's `Server` / `Database` parameters at your real warehouse and sign in (**Transform data → Edit parameters**, then **Data source settings**), or switch the partition to **Import** / **DirectLake**. This is the deliberate [Stage 2 storage-mode decision](#the-journey-at-a-glance) |
+
+**Quick way to tell them apart:** a *format/"couldn't open"* message is the **preview-feature**
+issue (#1); a *connection/SQL* message is the **data-source** issue (#2). The bundled sample is
+DirectQuery-to-placeholder by design, so it is expected to raise the #2 connection error until you
+repoint it — that is the same storage-mode call the run's red definition-of-done gate flags.
 
 ## The journey at a glance
 
