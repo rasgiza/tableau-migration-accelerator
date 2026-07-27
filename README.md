@@ -576,7 +576,9 @@ mechanical majority and hands your team a **precise, per-construct worklist** of
 human — instead of forcing them to hunt for what silently broke.
 
 **Guiding principle — *warn, never wrong*.** Every run ends with a definition-of-done gate that fails
-*loud* when it cannot prove a binding (e.g. it will not auto-pick Import vs. DirectLake storage mode).
+*loud* when it cannot prove a binding. Storage mode is a deliberate example: the tool never *guesses*
+it for you — **you choose** with `--storage-mode {import,directquery,directlake}` (or leave `auto` for a
+source-bound default), and it never lands your data in OneLake unless you explicitly opt into DirectLake.
 A red gate is the tool being honest, not broken — it converts what it can prove and refuses to guess
 the rest.
 
@@ -589,9 +591,12 @@ If you are sizing a real migration, tell the customer these four things up front
    value is not "100% automatic" — the tool does the mechanical majority, tells you *exactly* which
    calcs/LODs/custom-SQL need a human, and **never ships a wrong measure** (see the construct table
    above).
-2. **Storage mode is deliberately not guessed.** It will not auto-pick DirectLake vs. Import; it
-   binds what it can prove and flags the rest for you to point at the live warehouse. A red
-   definition-of-done gate here is expected, not a failure.
+2. **Storage mode is your choice, never guessed.** You pick with
+   `--storage-mode {import,directquery,directlake}` — `import`/`directquery` keep the model **bound to
+   your source with no data moved to OneLake**, and `directlake` is opt-in (see
+   [Storage modes](#storage-modes--you-do-not-have-to-move-data-to-onelake)). The tool binds what it
+   can prove and never auto-lands your data; a red definition-of-done gate on an unresolved source is
+   expected, not a failure.
 3. **Packaged `.twbx` extract reading needs x64.** The one optional native dependency
    (`tableauhyperapi`) has no Windows-on-ARM wheel. For a 150-workbook batch, run the estate on an
    **x64 box or CI runner** — otherwise packaged-data workbooks warn-and-skip (see
