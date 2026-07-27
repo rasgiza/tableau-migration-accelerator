@@ -223,14 +223,16 @@ repoint it — that is the same storage-mode call the run's red definition-of-do
 
 ## The journey at a glance
 
-Three stages take you from a Tableau file to a live Fabric report. **Stage 1 is the
-one you run today**; stages 2–3 are the same tool pointed at the cloud.
+Three stages take you from a Tableau file to a live Fabric report. **The mental model:**
+Stage 1 (convert) is always. **Stage 3 (Fabric) is the destination.** Stage 2 (Power BI Desktop)
+is an *optional* local QA stop in between — you can publish straight from Stage 1 to Stage 3 and
+skip Desktop entirely.
 
 | Stage | You run | You get | Needs |
 |---|---|---|---|
 | **1 · Convert** (offline) | `Convert-TableauToPowerBI.ps1 -Source <file-or-folder>` | Typed TMDL model + calc→DAX + openable `.pbip` + `migration-report.html` | Python 3.11 only — no internet, no Azure |
-| **2 · Open & finish** | Open the `.pbip` in Power BI Desktop | Visual QA + finish the flagged 20% (LODs, table calcs, storage mode) | Power BI Desktop |
-| **3 · Publish to Fabric** | `deploy_to_fabric.py --config fabric-deploy.json` | Model + report live in your Fabric workspace | `az login` + a Fabric workspace |
+| **2 · Open & finish** *(optional QA)* | Open the `.pbip` in Power BI Desktop | Visual QA + finish the flagged 20% (LODs, table calcs, storage mode) | Power BI Desktop — **not the destination; skippable** |
+| **3 · Publish to Fabric** *(the migration target)* | `deploy_to_fabric.py --config fabric-deploy.json` | Model + report live in your Fabric workspace | `az login` + a Fabric workspace |
 
 > **Where DirectLake fits:** the target end-state is the semantic model bound in
 > **DirectLake mode over Delta tables in OneLake** — all-Fabric, no import copy. The engine
@@ -267,14 +269,16 @@ deeper section, and the outcomes are the table above.
    > **DirectLake is opt-in and needs the OneLake URL from step 5 first.** Once your warehouse is
    > mirrored, run the estate script directly with the mirrored `Tables/` URL:
    > `py -3.11 engine/skills/tableau-migration/scripts/migrate_estate.py -i <in> -o <out> --storage-mode directlake --directlake-url "https://onelake.dfs.fabric.microsoft.com/<ws>/<item>/Tables"`.
-4. 🧑 **You — Power BI Desktop.** **Open & finish** — open the `.pbip`, do a visual QA pass, and finish
-   the flagged 20% the report calls out (LOD/table-calc stubs, storage-mode choice, native-source rebind).
+4. 🧑 **You — Power BI Desktop *(optional QA — skippable)*.** **Open & finish** — open the `.pbip`, do a
+   visual QA pass, and finish the flagged 20% the report calls out (LOD/table-calc stubs, storage-mode
+   choice, native-source rebind). This is a **local preview, not the destination** — you can go straight
+   from step 3 to the Fabric publish below without ever opening Desktop.
 5. 🧑 **You — Fabric portal (one-time, DirectLake only).** **Provision the destination** — create the
    workspace + Lakehouse and **mirror** your warehouse into OneLake as Delta
    ([which mirrored source to pick](#directlake-into-onelake--who-does-what)). Skip this for
    Import/DirectQuery. This is the manual hand-off the tool deliberately does **not** do for you.
-6. 🤖 **The tool — Fabric REST API.** **Publish to Fabric** ([Stage 3](#publish-into-fabric-stage-3),
-   optional):
+6. 🤖 **The tool — Fabric REST API.** **Publish to Fabric** ([Stage 3](#publish-into-fabric-stage-3) —
+   **the actual migration target**; needs your Fabric workspace):
    ```powershell
    az login
    # edit fabric-deploy.json -> set "workspace"
