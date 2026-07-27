@@ -1,7 +1,8 @@
-# Competitive Analysis — Best-in-Class Positioning
+# Competitive Analysis — Honest Positioning
 
-How this accelerator compares to the public Tableau→Power BI / Fabric migration guides and
-commercial accelerators, what we already do better, and the short list of ideas worth stealing.
+How this accelerator compares to the public Tableau→Power BI / Fabric migration guides, commercial
+accelerators, and open-source engines; what it genuinely does well, where others are ahead, and the
+short list of ideas worth stealing.
 
 Sources reviewed (Nov 2026):
 
@@ -10,6 +11,7 @@ Sources reviewed (Nov 2026):
 - **BIChart** — [Tableau Prep to Microsoft Fabric: A Pattern-by-Pattern Migration Guide](https://bichart.ai/blog/tableau-prep-to-microsoft-fabric-a-pattern-by-pattern-migration-guide) — 10-pattern classification of Tableau Prep flows.
 - **Evoke Technologies** — [Tableau to Power BI Migration Accelerator](https://www.evoketechnologies.com/services/data-ai/tableau-to-power-bi-migration-services/) — Asset Discovery, Metadata Extraction, Dataset/Visual Conversion, Validation & Reconciliation, Migration Monitoring.
 - **Pulse Convert** — Azure Marketplace SaaS accelerator (overview page; direct competitor).
+- **cyphou/Tableau-To-PowerBI** — [open-source MIT engine on GitHub](https://github.com/cyphou/Tableau-To-PowerBI) — the closest *code-level* competitor; see [§ 1a](#1a-open-source-engines--the-closest-competitor).
 
 > **Honesty note.** This is an *accelerator*, not a zero-touch converter. Every public guide
 > agrees no tool converts `.twb/.twbx` to production-quality Power BI unattended
@@ -19,10 +21,11 @@ Sources reviewed (Nov 2026):
 
 ---
 
-## 1. Where we already lead
+## 1. Capability coverage vs. the guides & commercial accelerators
 
 Grounded in the current engine (`engine/skills/tableau-migration/scripts/`), verified in code and
-tests.
+tests. This section compares against the **consulting methodologies and commercial accelerators**
+listed above; for the open-source engine comparison see [§ 1a](#1a-open-source-engines--the-closest-competitor).
 
 | Capability competitors advertise | What the accelerator already does | Evidence |
 |---|---|---|
@@ -45,6 +48,38 @@ to shipping code here — **including Migration Monitoring** (`migration-report.
 
 ---
 
+## 1a. Open-source engines — the closest competitor
+
+Most of the sources above are consulting **methodologies**, not automation. There is, however, at
+least one serious open-source **engine** in this space, and it is only fair to say so plainly.
+
+**[cyphou/Tableau-To-PowerBI](https://github.com/cyphou/Tableau-To-PowerBI)** (MIT, Python) is broad
+and actively developed. On raw feature surface area it is **ahead of this project**: a VS Code
+extension, a plugin SDK and pattern marketplace, shared/merged semantic models with thin reports,
+Tableau Prep (`.tfl`) flow migration, Tableau Server/Cloud ingestion, a Fabric-native output chain
+(Lakehouse + Dataflow Gen2 + PySpark notebook + DirectLake model + pipeline), a DAX optimizer, and a
+QA auto-fix suite — with a much larger advertised connector / visual / function count.
+
+The two projects optimize for **opposite** things, and that — not feature count — is the real
+distinction:
+
+| | This accelerator | cyphou/Tableau-To-PowerBI |
+|---|---|---|
+| Optimizes for | **Correctness** — prove it or flag it | **Coverage** — convert everything, auto-fix after |
+| Untranslatable construct | Inert labeled stub + original formula; surfaced in the worklist | Converted aggressively; a QA pass auto-patches known "leak patterns" |
+| Numeric validation | `reconciliation_oracle.py` — Tableau formula **and** candidate DAX parsed into one shared AST, evaluated over landed rows; `pass` only on proven agreement, else the stub stays | `--validate-data` post-migration query equivalence |
+| Data in OneLake | Customer's choice — Import/DirectQuery move no data; DirectLake is opt-in | Fabric-native path lands data as Delta |
+| Breadth | Deliberately narrower; deep on LOD / table calcs / custom SQL | Very broad |
+
+**Honest framing to use.** Do not claim to be "the best" or the only option. The defensible claim is
+narrower and stronger: *this project is built so that a wrong number is never shipped silently — it
+proves a translation against real rows or leaves a labeled stub.* Both projects publish their own
+test counts; neither number is a head-to-head correctness measurement. A public benchmark comparing
+both tools' output against Tableau's actual computed values is the only thing that would settle it,
+and until that exists this document should not imply the question is settled.
+
+---
+
 ## 2. Ideas worth stealing (ranked)
 
 | # | Idea (source) | Status in repo | Value | Recommended action |
@@ -64,10 +99,14 @@ Legend: ✅ done · 🟡 partial · ⚪ additive value · ❌ genuine gap · �
 
 ## 3. Positioning claims we can defend
 
-- **"We prove translations, we don't just generate them."** No competitor guide describes a
+- **"We prove translations, we don't just generate them."** None of the consulting guides describe a
   value-level numeric reconciliation oracle; they rely on a manual "match within 2%" parallel-run
   (Power BI Consulting). We keep that human gate *and* automate the arithmetic check where the
-  formula is in a safe subset.
+  formula is in a safe subset. Note that `cyphou/Tableau-To-PowerBI` does ship post-migration data
+  validation (`--validate-data`), so the defensible distinction is not "we validate and they don't"
+  — it is **what happens when validation cannot prove equivalence**: here the candidate is rejected
+  and the labeled stub stays (faithful-or-stub), rather than shipping the conversion and patching
+  known failure patterns afterwards.
 - **"Warn-never-wrong."** Untranslatable RLS fails closed to `FALSE()`; unresolved fields are
   never guessed; unsupported calcs become faithful stubs. A red definition-of-done gate is a
   feature, not a failure — it's the honesty other tools omit.
