@@ -7,7 +7,8 @@ rebuilt directly (join trees, multi-connection, unknown/partial connectors). Dir
 """
 from storage_mode import (
     FALLBACK_ANALYSIS_SERVICES, FALLBACK_LAND_TO_DELTA, FALLBACK_NEEDS_DECISION,
-    select_storage_mode)
+    select_storage_mode, configure_storage_mode_override, current_storage_mode_override,
+    STORAGE_MODE_CHOICES)
 
 import pytest
 
@@ -391,6 +392,103 @@ def test_generic_jdbc_is_not_routed_as_odbc():
     assert d["mode"] is None
     assert d["connector"] is None
     assert d["fallback"] == FALLBACK_NEEDS_DECISION
+
+
+# ---------------------------------------------------------------------------------------------
+# Customer --storage-mode override. 'auto' keeps the derived decision; 'import'/'directquery'
+# FORCE a source-bound mode (no data moved to OneLake) where feasible; an infeasible request keeps
+# the safe derived mode and is flagged. 'directlake' passes the per-source decision through (the
+# land-to-Delta seam realizes it). Audit fields requested_mode / override_applied stay honest.
+# ---------------------------------------------------------------------------------------------
+def test_override_import_forces_live_directquery_to_import():
+    # A live warehouse defaults to DirectQuery; a customer who wants Import (the usual pick, no live
+    # query load) gets a source-bound Import model -- no data moved to OneLake.
+    d = select_storage_mode(_desc(connection_class="snowflake", server="acct.snowflakecomputing.com",
+                                  warehouse="WH"), override="import")
+    assert d["mode"] == "Import"
+    assert d["recommended_mode"] == "Import"
+    assert d["requested_mode"] == "Import"
+    assert d["override_applied"] is True
+    assert d["connector"] == "Snowflake.Databases"   # same connector/M, just cached
+    assert "no data moved to onelake" in d["rationale"].lower()
+
+
+def test_override_import_is_noop_when_already_import():
+    d = select_storage_mode(_desc(connection_class="excel-direct", server=None, database=None),
+                            override="import")
+    assert d["mode"] == "Import"
+    assert d["requested_mode"] == "Import"
+    assert d["override_applied"] is True
+
+
+def test_override_directquery_forces_extract_to_live():
+    # An extract over a live-capable source defaults to Import; a customer can force the live
+    # DirectQuery rebuild against the upstream (feasible because a live upstream exists).
+    d = select_storage_mode(_desc(is_extract=True), override="directquery")
+    assert d["mode"] == "DirectQuery"
+    assert d["recommended_mode"] == "DirectQuery"
+    assert d["requested_mode"] == "DirectQuery"
+    assert d["override_applied"] is True
+
+
+def test_override_directquery_on_flat_file_is_flagged_not_forced():
+    # A flat file has no live upstream to query -> the request is NOT forced; Import is kept and a
+    # loud follow-up explains why (never emit a broken DirectQuery model).
+    d = select_storage_mode(_desc(connection_class="excel-direct", server=None, database=None),
+                            override="directquery")
+    assert d["mode"] == "Import"
+    assert d["requested_mode"] == "DirectQuery"
+    assert d["override_applied"] is False
+    assert any("no live upstream" in f.lower() for f in d["manual_followups"])
+
+
+def test_override_on_needs_decision_records_but_does_not_apply():
+    d = select_storage_mode(_desc(connection_class="saphana"), override="import")
+    assert d["mode"] is None                     # still an honest needs-decision
+    assert d["fallback"] == FALLBACK_NEEDS_DECISION
+    assert d["requested_mode"] == "Import"
+    assert d["override_applied"] is False
+
+
+def test_override_directlake_passes_decision_through():
+    # DirectLake is realized by the seam, so the per-source Import/DirectQuery derivation is
+    # untouched here; only the request is recorded.
+    d = select_storage_mode(_desc(), override="directlake")
+    assert d["mode"] == "DirectQuery"            # derived value preserved
+    assert d["requested_mode"] == "DirectLake"
+    assert d["override_applied"] is False
+
+
+def test_override_auto_is_identical_to_no_override():
+    base = select_storage_mode(_desc())
+    forced = select_storage_mode(_desc(), override="auto")
+    assert forced == base
+    assert "requested_mode" not in base          # auto adds no audit fields
+
+
+def test_process_wide_override_is_honored_and_restorable():
+    prev = configure_storage_mode_override("import")
+    try:
+        assert current_storage_mode_override() == "import"
+        d = select_storage_mode(_desc(connection_class="snowflake",
+                                      server="a.snowflakecomputing.com", warehouse="WH"))
+        assert d["mode"] == "Import"             # honored without passing override= at the call site
+    finally:
+        configure_storage_mode_override(prev)
+    assert current_storage_mode_override() is None
+    # back to auto: live source derives DirectQuery again.
+    assert select_storage_mode(_desc(connection_class="snowflake",
+                                     server="a.snowflakecomputing.com", warehouse="WH"))["mode"] == "DirectQuery"
+
+
+def test_configure_override_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        configure_storage_mode_override("mirror")
+    assert current_storage_mode_override() is None   # unchanged after the failed call
+
+
+def test_storage_mode_choices_are_the_supported_set():
+    assert STORAGE_MODE_CHOICES == ("auto", "import", "directquery", "directlake")
 
 
 # -- native query-engine routing over ODBC (Spark / Presto / Trino / Starburst) ------------------

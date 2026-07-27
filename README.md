@@ -302,9 +302,14 @@ deeper section, and the outcomes are the table above.
    > Zero setup? Use the bundled sample: `-Source .\sample\Superstore.twb`. On a fresh Windows box,
    > unblock scripts once per session: `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned`.
    >
+   > **You pick the storage mode — you don't have to move data to OneLake.** Add
+   > `--storage-mode import` (or `directquery`) on the estate script for a **source-bound** model
+   > that reads straight from your source ([storage modes](#storage-modes--you-do-not-have-to-move-data-to-onelake)).
    > **DirectLake is opt-in and needs the OneLake URL from step 5 first.** Once your warehouse is
-   > mirrored, run the estate script directly with the mirrored `Tables/` URL:
-   > `py -3.11 engine/skills/tableau-migration/scripts/migrate_estate.py -i <in> -o <out> --storage-mode directlake --directlake-url "https://onelake.dfs.fabric.microsoft.com/<ws>/<item>/Tables"`.
+   > mirrored, run the estate script with the mirrored `Tables/` URL — **passing `--directlake-url`
+   > is what opts an extract-backed model into DirectLake** (omit it and the model stays
+   > Import/DirectQuery bound to the original source):
+   > `py -3.11 engine/skills/tableau-migration/scripts/migrate_estate.py -i <in> -o <out> --directlake-url "https://onelake.dfs.fabric.microsoft.com/<ws>/<item>/Tables"`.
 4. 🧑 **You — Power BI Desktop *(optional QA — skippable)*.** **Open & finish** — open the `.pbip`, do a
    visual QA pass, and finish the flagged 20% the report calls out (LOD/table-calc stubs, storage-mode
    choice, native-source rebind). This is a **local preview, not the destination** — you can go straight
@@ -689,6 +694,35 @@ Desktop, no secrets in any file.
 > refreshing a DirectQuery/DirectLake model. A 401/403 on refresh means "go configure the
 > connection," not a bug.
 
+### Storage modes — you do **not** have to move data to OneLake
+
+Not every customer wants to mirror or land their data in OneLake, and **you don't have to.** The
+accelerator emits all three Power BI storage modes, and **you choose** with one flag on the estate
+script — `--storage-mode {auto,import,directquery,directlake}` (default `auto`):
+
+| Mode | What the model does | Moves data to OneLake? | Pick it when |
+|---|---|---|---|
+| **Import** | Caches a snapshot of the source in the model (scheduled/triggered refresh) | ❌ No | You want the most compatible default — best for most models, **including warehouses like Snowflake** (avoids per-visual live query load) |
+| **DirectQuery** | Queries the original source live at view time; nothing stored | ❌ No | You must not copy data at all, need near-real-time, or a table is too big to import (watch concurrency cost on the source) |
+| **DirectLake** | Reads Delta tables in OneLake directly (all-Fabric, no import copy) | ✅ Yes (by choice) | You're going all-in on Fabric and will mirror/land data as Delta — Microsoft's recommended end-state, but **opt-in** |
+
+- **`auto`** (default) derives per source: a live relational connection → **DirectQuery**, an
+  extract / flat file / ODBC → **Import**. Nothing is landed in OneLake unless you ask.
+- **`import`** / **`directquery`** force a **source-bound** model — your data stays where it is.
+  (`--directlake-url` is ignored when you pick these, so "keep my data in place" always wins.)
+- **`directlake`** pairs with `--directlake-url` (the mirrored/Lakehouse `Tables/` URL — see
+  below). Without the URL a placeholder is stamped for you to edit after mirroring.
+- An **impossible** request (e.g. `directquery` on an offline extract with no live upstream) is
+  **never emitted wrong** — the model keeps the safe mode and the migration report flags why.
+
+```powershell
+# Source-bound Import (no OneLake) — the common "I don't want to move my data" choice:
+py -3.11 engine/skills/tableau-migration/scripts/migrate_estate.py -i <in> -o <out> --storage-mode import
+```
+
+DirectLake is only reached when you deliberately opt in — the accelerator **never** auto-lands your
+data. Here's that opt-in path:
+
 ### DirectLake into OneLake — who does what
 
 The end-state is the model bound in **DirectLake mode over Delta tables in OneLake** —
@@ -719,9 +753,11 @@ analytics endpoint. Then point the accelerator at that data with `--directlake-u
 and pass the Lakehouse path. A mirrored database's Delta tables are DirectLake-ready with no extra
 copy.
 
-**The tool automates (opt-in `--storage-mode directlake`).** It stamps DirectLake TMDL, binds it
-to the OneLake `Tables/` URL you pass via `--directlake-url` (substituting the placeholder), then
-`deploy_to_fabric.py` pushes the model + report to your workspace over REST.
+**The tool automates (opt-in via `--directlake-url`).** Passing that flag is what opts an
+extract-backed model into DirectLake: it stamps DirectLake TMDL and binds it to the OneLake
+`Tables/` URL you pass (substituting the placeholder). Omit the flag and the model stays
+Import/DirectQuery against the original source. Then `deploy_to_fabric.py` pushes the model +
+report to your workspace over REST.
 
 **Not automated — by design.** Having the tool *itself* create the Lakehouse or copy/mirror your
 data hands-off is a deliberate boundary: a migration tool shouldn't silently spin up

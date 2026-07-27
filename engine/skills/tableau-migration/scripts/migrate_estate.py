@@ -53,7 +53,8 @@ from datetime import datetime, timezone
 try:  # works whether imported as a package or run with scripts/ on sys.path
     from .connection_to_m import (parse_tds, extract_bundled_flatfile, extract_calcs,
                                   combine_descriptors)
-    from .storage_mode import select_storage_mode, FALLBACK_NEEDS_DECISION
+    from .storage_mode import (select_storage_mode, FALLBACK_NEEDS_DECISION,
+                               configure_storage_mode_override, STORAGE_MODE_CHOICES)
     from .assemble_model import (assemble_import_model, assemble_local_import_model,
                                  materialize_bundled_flatfile_data, write_model_folder,
                                  write_local_pbip, migrate_datasource, list_workbook_datasources,
@@ -70,7 +71,8 @@ try:  # works whether imported as a package or run with scripts/ on sys.path
 except ImportError:
     from connection_to_m import (parse_tds, extract_bundled_flatfile, extract_calcs,
                                  combine_descriptors)
-    from storage_mode import select_storage_mode, FALLBACK_NEEDS_DECISION
+    from storage_mode import (select_storage_mode, FALLBACK_NEEDS_DECISION,
+                              configure_storage_mode_override, STORAGE_MODE_CHOICES)
     from assemble_model import (assemble_import_model, assemble_local_import_model,
                                 materialize_bundled_flatfile_data, write_model_folder,
                                 write_local_pbip, migrate_datasource, list_workbook_datasources,
@@ -4135,6 +4137,16 @@ def main(argv=None):
                              "measure/column descriptions). On by default so the emitted model is "
                              "grounded for Power BI Q&A / Copilot; pass this to emit the leaner, "
                              "description-free model instead")
+    parser.add_argument("--storage-mode", choices=STORAGE_MODE_CHOICES, default="auto",
+                        help="customer storage-mode choice for the emitted models (default: auto). "
+                             "'auto' derives per source (live -> DirectQuery, extract/flat/ODBC -> "
+                             "Import). 'import' and 'directquery' FORCE a source-bound mode that "
+                             "reads straight from the original source with NO data moved to OneLake "
+                             "(pick these if you do not want to mirror/land your data; 'import' is "
+                             "the usual pick for warehouses). 'directlake' pairs with --directlake-url "
+                             "to land data as Delta in OneLake. An infeasible request (e.g. "
+                             "directquery on a flat file / offline extract) keeps the safe derived "
+                             "mode and is flagged in the report, never emitted wrong.")
     parser.add_argument("--directlake-url", metavar="URL", default=None,
                         help="OneLake 'Tables' URL of the lakehouse / mirrored database that "
                              "extract-backed sources rebind to as a DirectLake-over-OneLake seam "
@@ -4212,11 +4224,28 @@ def main(argv=None):
     else:
         source = LocalFilesSource(args.input)
 
-    # Configure the process-wide extract-backed DirectLake seam target ONCE for the whole run, so
-    # every emitted extract-backed model (workbook rebuild, standalone-datasource pass, published
-    # match, rebind resolver) shares the same real OneLake 'Tables' URL. When --directlake-url is
-    # omitted the placeholder is emitted (byte-identical to before this flag existed).
-    configure_directlake_seam(args.directlake_url, args.directlake_schema, args.rebind_materialized)
+    # Configure the customer storage-mode choice + the extract-backed DirectLake seam ONCE for the
+    # whole run, so every emitted model (workbook rebuild, standalone-datasource pass, published
+    # match, rebind resolver) honors the same choice. The two flags are reconciled to a coherent,
+    # predictable rule so a customer never gets a surprise:
+    #   * import / directquery  -> source-bound (NO data moved to OneLake). A --directlake-url passed
+    #     alongside is ignored (with a warning) so "keep my data in place" always wins.
+    #   * directlake            -> land-to-Delta seam; when no --directlake-url is given a placeholder
+    #     URL is stamped for the customer to edit after mirroring the source to OneLake as Delta.
+    #   * auto (default)        -> derive per source; the seam is active only when --directlake-url is
+    #     supplied (byte-identical to before this flag existed).
+    _seam_url = args.directlake_url
+    if args.storage_mode in ("import", "directquery"):
+        if args.directlake_url:
+            print(f"[WARN] --storage-mode {args.storage_mode} keeps the model source-bound (no data "
+                  "moved to OneLake); ignoring --directlake-url for this run.")
+        _seam_url = None
+    elif args.storage_mode == "directlake" and not args.directlake_url:
+        print("[WARN] --storage-mode directlake selected without --directlake-url; a placeholder "
+              "OneLake 'Tables' URL is stamped -- edit it after mirroring the source to OneLake as "
+              "Delta (or re-run with --directlake-url).")
+    configure_storage_mode_override(args.storage_mode)
+    configure_directlake_seam(_seam_url, args.directlake_schema, args.rebind_materialized)
 
     # No Tableau assets in scope -> stop with an actionable message instead of emitting an empty
     # bundle (or an empty scan) that looks like a successful no-op.

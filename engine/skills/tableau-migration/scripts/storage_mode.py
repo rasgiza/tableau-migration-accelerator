@@ -213,6 +213,48 @@ SCORE_ODBC = 60              # generic-ODBC custom SQL emitted via Odbc.Query (n
 SCORE_FALLBACK = 30           # no direct rebuild; storage decision required (Import default / opt-in DirectLake)
 NATIVE_QUERY_PENALTY = 10     # custom-SQL native query needs a folding review before refresh
 
+# Customer-selectable storage mode (CLI ``--storage-mode``). The default ``auto`` keeps the
+# auto-derived decision below. ``import`` / ``directquery`` let a customer FORCE a source-bound
+# mode -- the model reads straight from the original source with NO data moved to OneLake, which is
+# what customers who do not want to mirror/land their data need (Import is also the usual
+# recommendation for warehouses such as Snowflake, avoiding per-visual live query load). Forcing is
+# only applied when it is FEASIBLE (e.g. DirectQuery needs a live upstream Power BI can query); an
+# infeasible request keeps the safe derived mode and is flagged, never silently emitted wrong.
+# ``directlake`` is realized by the land-to-Delta seam (``assemble_model.configure_directlake_seam``
+# + ``--directlake-url``), so the per-source decision is passed through and only tagged here.
+STORAGE_MODE_CHOICES = ("auto", "import", "directquery", "directlake")
+_MODE_LABEL = {"import": "Import", "directquery": "DirectQuery", "directlake": "DirectLake"}
+
+# Process-wide customer override, set once per estate run by the CLI (mirrors the estate-run
+# ``configure_directlake_seam`` pattern) so every ``select_storage_mode`` recompute in the run
+# honors the same choice without threading the flag through internal call sites. ``None`` == auto.
+_STORAGE_MODE_OVERRIDE = None
+
+
+def configure_storage_mode_override(mode):
+    """Set (or clear, with a falsy / ``"auto"`` value) the process-wide customer storage-mode override.
+
+    Estate-run configuration, not per-call state: the CLI calls this ONCE before a run. Returns the
+    previous value so a caller (or a test) can restore it. Raises ``ValueError`` on an unknown mode
+    so a typo fails loudly at startup rather than silently doing nothing.
+    """
+    global _STORAGE_MODE_OVERRIDE
+    prev = _STORAGE_MODE_OVERRIDE
+    norm = (mode or "").strip().lower() or None
+    if norm in (None, "auto"):
+        _STORAGE_MODE_OVERRIDE = None
+    elif norm in STORAGE_MODE_CHOICES:
+        _STORAGE_MODE_OVERRIDE = norm
+    else:
+        raise ValueError(
+            f"unknown storage-mode override {mode!r}; choose one of {STORAGE_MODE_CHOICES}")
+    return prev
+
+
+def current_storage_mode_override():
+    """Return the process-wide storage-mode override (``None`` when unset / ``auto``)."""
+    return _STORAGE_MODE_OVERRIDE
+
 _CREDENTIALS_FOLLOWUP = "Configure connection credentials in Fabric (bind links IDs only)."
 _GATEWAY_FOLLOWUP = "If the source is on-premises, set up / select a data gateway for the connection."
 _NATIVE_QUERY_FOLLOWUP = "Review the preserved custom SQL native query (folding / approval) before refresh."
@@ -335,7 +377,97 @@ def _structurally_unsupported_reason(descriptor):
     return "; ".join(dict.fromkeys(reasons)) or None
 
 
-def select_storage_mode(descriptor):
+def select_storage_mode(descriptor, override=None):
+    """Choose a storage mode for one Tableau datasource descriptor, honoring a customer override.
+
+    ``override`` (or, when ``None``, the process-wide default from
+    :func:`configure_storage_mode_override`) is the CLI ``--storage-mode`` choice:
+    ``None`` / ``"auto"`` keeps the auto-derived decision; ``"import"`` / ``"directquery"`` force a
+    source-bound mode (NO data moved to OneLake) where feasible; ``"directlake"`` is realized by the
+    land-to-Delta seam and passes the decision through here (only tagged with the request).
+
+    The forced decision carries honest audit fields -- ``requested_mode`` (what the customer asked
+    for) and ``override_applied`` (whether it was feasible) -- and, when a request could not be
+    honored, an added ``manual_followups`` line explaining why the safe derived mode was kept.
+    """
+    decision = _auto_select_storage_mode(descriptor)
+    ov = override if override is not None else _STORAGE_MODE_OVERRIDE
+    return _apply_storage_override(decision, descriptor, ov)
+
+
+def _apply_storage_override(decision, descriptor, override):
+    """Apply a customer ``--storage-mode`` override to an auto-derived decision (pure).
+
+    Returns the decision unchanged for ``auto`` / unset, else a shallow copy with the forced
+    ``mode`` plus ``requested_mode`` / ``override_applied`` audit fields. ``import`` /
+    ``directquery`` stay source-bound (no OneLake). An infeasible request (e.g. DirectQuery on a
+    flat file or offline extract with no live upstream) is NOT forced -- the safe derived mode is
+    kept and a loud follow-up explains why. ``directlake`` is realized by the seam, so the per-source
+    Import / DirectQuery derivation is passed through untouched and only tagged with the request.
+    """
+    ov = (override or "").strip().lower()
+    if ov in ("", "auto"):
+        return decision
+    d = dict(decision)
+    d["requested_mode"] = _MODE_LABEL.get(ov, ov)
+    mode = decision.get("mode")
+
+    if ov == "directlake":
+        # Seam-realized (configure_directlake_seam + --directlake-url); leave the Import/DirectQuery
+        # derivation to the assembler, which rebinds extract-backed base tables onto the Delta seam.
+        d["override_applied"] = False
+        return d
+
+    if mode is None:
+        # No safe direct rebuild -> can't force a concrete mode; keep the honest needs-decision route
+        # and record the (unapplied) request so the report is transparent about it.
+        d["override_applied"] = False
+        d["manual_followups"] = list(d.get("manual_followups", [])) + [
+            f"Requested storage mode '{_MODE_LABEL.get(ov, ov)}', but this source has no safe "
+            "direct-to-source rebuild yet (see the storage decision above); the override is recorded "
+            "but not applied until a connection/shape is resolvable."]
+        return d
+
+    if ov == "import":
+        if mode == "Import":
+            d["override_applied"] = True
+            return d
+        # DirectQuery -> Import: identical M, cached snapshot; valid for ANY live source and the
+        # usual recommendation for warehouses (avoids per-visual live query load). Still source-bound.
+        d["mode"] = "Import"
+        d["recommended_mode"] = "Import"
+        d["override_applied"] = True
+        d["rationale"] = (decision.get("rationale", "")
+                          + " [--storage-mode import: emitted as an Import (cached) model at the "
+                            "customer's request; still source-bound -- no data moved to OneLake.]")
+        return d
+
+    # ov == "directquery"
+    if mode == "DirectQuery":
+        d["override_applied"] = True
+        return d
+    # Import -> DirectQuery only when a live upstream Power BI can actually query exists (a mapped or
+    # recognized live connector). Flat file / offline extract / driver-only ODBC have none.
+    if decision.get("direct_upstream_available"):
+        d["mode"] = "DirectQuery"
+        d["recommended_mode"] = "DirectQuery"
+        d["override_applied"] = True
+        d["rationale"] = (decision.get("rationale", "")
+                          + " [--storage-mode directquery: rebuilt live against the upstream source "
+                            "at the customer's request; no data moved to OneLake.]")
+        return d
+    d["override_applied"] = False
+    d["manual_followups"] = list(d.get("manual_followups", [])) + [
+        "Requested DirectQuery, but this source has no live upstream Power BI can query directly "
+        "(flat file / offline extract / driver-only ODBC); kept as Import so the model still loads. "
+        "Point it at a live relational source to use DirectQuery."]
+    d["rationale"] = (decision.get("rationale", "")
+                      + " [--storage-mode directquery requested but not feasible for this source; "
+                        "kept Import.]")
+    return d
+
+
+def _auto_select_storage_mode(descriptor):
     """Choose a storage mode for one Tableau datasource descriptor.
 
     Returns a decision dict: ``mode`` ('Import'|'DirectQuery'|None), ``connector``,
