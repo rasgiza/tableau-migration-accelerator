@@ -33,6 +33,7 @@ A map of this README and the deep-dive docs, so anyone can jump straight to what
 - [What happens to my dashboards & visuals?](#what-happens-to-my-dashboards--visuals)
 - [Is the model ready for Copilot / Q&A?](#is-the-model-ready-for-copilot--qa)
 - [Calculations, LOD, parameters & custom SQL](#how-does-it-handle-my-calculations-lod-expressions-parameters--custom-sql)
+- [The migration report — what it couldn't do, too](#the-migration-report--it-tells-you-what-it-couldnt-do-too)
 
 **Scale & operations**
 - [Planning a large estate (150+ workbooks)](#planning-a-large-estate-eg-150-workbooks--what-to-expect)
@@ -581,6 +582,28 @@ it for you — **you choose** with `--storage-mode {import,directquery,directlak
 source-bound default), and it never lands your data in OneLake unless you explicitly opt into DirectLake.
 A red gate is the tool being honest, not broken — it converts what it can prove and refuses to guess
 the rest.
+
+## The migration report — it tells you what it *couldn't* do, too
+
+Say the accelerator does 80–85% of the work on your estate. The obvious question is: **what about
+the rest — do I have to hunt for it?** No. Every run writes a **migration report** (HTML you can open
+offline, plus machine-readable JSON) whose whole job is to hand you the remaining 15–20% as a
+**precise, labeled to-do list**. Nothing it can't convert is dropped or silently "best-guessed" — it
+is surfaced with the reason.
+
+Concretely, the report shows you:
+
+| In the report | What it tells you |
+|---|---|
+| **Coverage scoreboard** | Per workbook: *"X of Y calcs translated · N% coverage · M need review."* You see the ratio, not a vague "done." |
+| **"Needs review" worklist** | Every calc the engine would **not** translate deterministically — with its **name, the original Tableau formula, a category** (LOD / table calc / unsupported function…), and **the concrete reason**. A real developer to-do list, grouped by category. |
+| **Manual follow-ups** | Per datasource: the operational steps a human still owns — *configure credentials in Fabric*, *set up a data gateway for an on-prem source*, *review the preserved custom SQL before refresh*, *flat-file source loads no rows until you point it at the data*, storage-mode confirmations. |
+| **Visual fidelity punch-list** | Per visual: which charts matched cleanly and which want a hand-finishing / QA pass. |
+| **Honest status stamp** | Every workbook is marked `migrated` **or** `migrated_with_followups`. If any follow-up exists, the run **cannot** report a clean migration — it never tells you it's done when it isn't. |
+
+**Why this matters:** at estate scale, *"here is exactly what a human still needs to finish, and
+why"* is worth more than the raw conversion percentage. The flagged worklist is precisely the
+punch-list you (or a partner) work through — instead of discovering weeks later what quietly broke.
 
 ## Planning a large estate (e.g. 150+ workbooks) — what to expect
 
