@@ -21,6 +21,7 @@ A map of this README and the deep-dive docs, so anyone can jump straight to what
 **Start here**
 - [Big picture (end-to-end architecture)](#big-picture-end-to-end)
 - [Quick start (working result in ~60 seconds)](#quick-start-get-a-working-result-in-60-seconds)
+- [Recommended way to test the accelerator](#recommended-way-to-test-the-accelerator) — what each test proves, in what order
 - [The journey at a glance](#the-journey-at-a-glance) — the 3 stages + the end-to-end commands
 - [Step 0 — Get your Tableau files out](#step-0--get-your-tableau-files-out-and-staging-a-large-estate)
 - [Convert a report — one command](#convert-a-tableau-report-to-a-power-bi-semantic-model-one-command)
@@ -185,6 +186,41 @@ python3 engine/skills/tableau-migration/scripts/migrate_estate.py -i ./sample -o
 
 That's the whole offline loop. For bulk-exporting a real estate, publishing to Fabric, and the
 full walkthrough, keep reading.
+
+## Recommended way to test the accelerator
+
+Evaluating this for real? Test it in the order below — each step needs less trust and more setup
+than the last, so you build confidence before touching the cloud. This mirrors how migration
+consultancies actually run a Tableau→Power BI/Fabric pilot (convert offline → validate the evidence
+→ review in Desktop → land in Fabric in waves); see [competitive-analysis.md](docs/competitive-analysis.md)
+for the five public guides this aligns with.
+
+**Do them in this order:**
+
+1. **Convert, then read `migration-report.html` first.** It is offline, opens in any browser, and
+   **never errors** — the safest, most honest first look. It shows exactly what converted, the
+   per-workbook sign-off, calc lineage, and the remaining manual to-dos. Judge "did it work?" here,
+   **not** by whether a model connects yet.
+2. *(Optional)* **Open the `.pbip` in Power BI Desktop** to eyeball the model structure (tables,
+   columns, relationships, DAX). This is local QA, not the destination —
+   [see the prerequisites](#opening-the-pbip-in-power-bi-desktop--prerequisites--troubleshooting) first.
+3. **Only when you have a Fabric tenant:** publish to Fabric ([Stage 3](#publish-into-fabric-stage-3)).
+   This is the step that proves the *actual migration* lands live.
+
+**What each test actually proves — so you don't misread a result:**
+
+| What you want to prove | Test with | Reality |
+|---|---|---|
+| "The tool converts and produces a real model" | `migration-report.html` + the `.pbip` on disk | ✅ Instant, offline, no cloud |
+| "The model opens and its structure is correct" | Power BI **Desktop** (Stage 2) | ✅ Tables / columns / DAX are visible |
+| "Data loads and dashboards light up" | Desktop **with a real live-connected workbook** | ⚠️ The bundled sample points at a **placeholder** source, so it raises a connect error *by design* — use a real workbook + source to see data |
+| "It lands live in Fabric" | **Fabric** (Stage 3) | ✅ Only this proves the end-to-end migration; needs your workspace + a data source |
+
+> **The one caveat that trips people up:** the bundled `sample/Superstore.twb` is DirectQuery-bound
+> to a fake server on purpose (storage mode is [never auto-guessed](#how-does-it-handle-my-calculations-lod-expressions-parameters--custom-sql)).
+> Opening it in Desktop shows a correct model but a **SQL connect error** — that is expected, not a
+> failure. To see data actually load with zero cloud setup, test with a **real live-connected
+> Tableau workbook** (one that points at a database you can reach) dropped in `workbooks/`.
 
 ## Opening the `.pbip` in Power BI Desktop — prerequisites & troubleshooting
 
