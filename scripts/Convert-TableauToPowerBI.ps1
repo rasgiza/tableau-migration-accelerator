@@ -86,12 +86,28 @@ if (-not (Test-Path $migrate)) {
 }
 
 # --- pick a Python 3.11 interpreter -----------------------------------------
+# Order matters. An ACTIVE virtual environment comes first: the optional Hyper API that -Verify needs
+# is installed with `pip install tableauhyperapi`, which lands it in whatever venv the customer had
+# activated -- and if we then launched the `py` launcher's system interpreter instead, that install
+# would be silently invisible and every numeric check would report "no rows landed". Among otherwise
+# valid interpreters we then PREFER one that can actually import the Hyper API, so a customer who
+# followed the README gets the verification they installed for instead of a quiet no-op.
 function Resolve-Python {
-    foreach ($candidate in @(
-            @{ Exe = 'py';     Args = @('-3.11') },
-            @{ Exe = 'python'; Args = @() },
-            @{ Exe = 'python3'; Args = @() }
-        )) {
+    $candidates = @()
+    if ($env:VIRTUAL_ENV) {
+        foreach ($rel in @('Scripts/python.exe', 'bin/python')) {
+            $p = Join-Path $env:VIRTUAL_ENV $rel
+            if (Test-Path $p) { $candidates += @{ Exe = $p; Args = @() } }
+        }
+    }
+    $candidates += @(
+        @{ Exe = 'py';      Args = @('-3.11') },
+        @{ Exe = 'python';  Args = @() },
+        @{ Exe = 'python3'; Args = @() }
+    )
+
+    $valid = @()
+    foreach ($candidate in $candidates) {
         $exe = Get-Command $candidate.Exe -ErrorAction SilentlyContinue
         if (-not $exe) { continue }
         try {
@@ -99,12 +115,21 @@ function Resolve-Python {
             if ($LASTEXITCODE -eq 0 -and $v) {
                 $parts = $v.Trim().Split('.')
                 if ([int]$parts[0] -ge 3 -and [int]$parts[1] -ge 11) {
-                    return [pscustomobject]@{ Exe = $candidate.Exe; Prefix = @($candidate.Args) }
+                    $valid += [pscustomobject]@{ Exe = $candidate.Exe; Prefix = @($candidate.Args) }
                 }
             }
         } catch { }
     }
-    throw "Python 3.11+ is required but was not found. Install it (e.g. 'winget install Python.Python.3.11') and retry."
+    if (-not $valid) {
+        throw "Python 3.11+ is required but was not found. Install it (e.g. 'winget install Python.Python.3.11') and retry."
+    }
+    foreach ($v in $valid) {
+        try {
+            & $v.Exe @($v.Prefix + @('-c', 'import tableauhyperapi')) 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { return $v }
+        } catch { }
+    }
+    return $valid[0]
 }
 $py = Resolve-Python
 Write-Host "Using Python: $("$($py.Exe) $($py.Prefix -join ' ')".Trim())" -ForegroundColor DarkGray
@@ -273,6 +298,26 @@ if s.get("semantics_checked"):
     if not _blocking and not _advisory:
         print(f"  DAX checked          : {s['semantics_checked']} expression(s), no invalid DAX and no"
               f" suspect re-aggregation found.")
+# The deterministic-translation sweep: the oracle pointed at the DAX the ORDINARY build produced,
+# rather than only at the second compiler's output. That is the population that matters -- most of
+# every model comes from here -- so all three outcomes are printed, never just the flattering one.
+_swept = s.get("sweep_checked", 0)
+_disagree = s.get("sweep_disagreements", 0)
+if _disagree:
+    print(f"  WRONG NUMBERS        : {_disagree} translation(s) PROVEN to disagree with the original")
+    print("                         Tableau formula over landed data. Do not ship these -- report.json")
+    print("                         has both values and the grain they diverge at.")
+if _swept:
+    _proven, _unproven = s.get("sweep_verified", 0), s.get("sweep_unproven", 0)
+    print(f"  Translations proven  : {_proven} of {_swept} checked against landed rows")
+    if _unproven:
+        print(f"  ...neither proven nor disproven: {_unproven} (the oracle could not decide)")
+        for _reason, _n in sorted((s.get("sweep_unproven_reasons") or {}).items(),
+                                  key=lambda kv: -kv[1])[:3]:
+            print(f"       - {_n}: {_reason}")
+    if not _proven and not _disagree:
+        print("                         A low proven count is a limit of the checker. It is not")
+        print("                         evidence the translations are wrong -- nor that they are right.")
 '@
     Invoke-Py '-c' $summaryScript $reportPath
 }

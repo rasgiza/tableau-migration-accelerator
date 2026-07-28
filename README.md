@@ -216,7 +216,7 @@ for the five public guides this aligns with.
 | "The model opens and its structure is correct" | Power BI **Desktop** (Stage 2) | ✅ Tables / columns / DAX are visible |
 | "Data loads and dashboards light up" | Desktop **with a real live-connected workbook** | ⚠️ The bundled sample points at a **placeholder** source, so it raises a connect error *by design* — use a real workbook + source to see data |
 | "It lands live in Fabric" | **Fabric** (Stage 3) | ✅ Only this proves the end-to-end migration; needs your workspace + a data source |
-| "The numbers match Tableau" | `-Verify` (opt-in) | ⚠️ Only for calcs the oracle can evaluate over **landed** rows — [see below](#does-it-check-that-the-numbers-are-right) |
+| "The numbers match Tableau" | `-Verify` (opt-in) | ⚠️ Sweeps **every** translated calc, but can only *prove* the ones the oracle can evaluate over **landed** rows — a proven disagreement fails the run — [see below](#does-it-check-that-the-numbers-are-right) |
 | "The generated DAX is valid, and aggregates honestly" | Every run, automatically | ✅ Offline, no data needed — but it proves the *absence of specific defects*, not correctness — [see below](#what-the-dax-check-on-every-run-actually-catches) |
 
 > **The one caveat that trips people up:** the bundled `sample/Superstore.twb` is DirectQuery-bound
@@ -241,9 +241,32 @@ Two preconditions decide whether it can report anything at all:
 | Precondition | What it means in practice |
 |---|---|
 | **Rows landed on disk** | A workbook whose data is a bundled `.hyper` extract — the usual Tableau Cloud export — needs the optional Tableau Hyper API (`pip install tableauhyperapi`). The core engine is stdlib-only and will not read extract data without it, and no Windows **ARM64** build of that package is published. No rows on disk means nothing to evaluate against. |
-| **The calc is in the oracle's scope** | It examines the calculations recovered by the second-compiler pass — not the ones the deterministic pass already translated — and within that, a supported subset: arithmetic over single-column aggregations on one table. |
+| **The calc is in the oracle's scope** | A supported subset: arithmetic over single-column aggregations on one table. |
 
-When either precondition fails, the summary says so in words instead of printing a zero, because a
+`-Verify` now points the oracle at **both** populations, and reports them separately:
+
+- the calculations recovered by the second-compiler pass, and
+- every calculation the **deterministic** pass translated — which is most of a typical model, and
+  which until now was never checked against a single row of data.
+
+The sweep over the deterministic pass is read-only and lands nothing. It deliberately does not
+promote a translation's provenance from `deterministic` to `verified` in the model itself: passing a
+numeric spot-check is not the same as having been derived empirically, and laundering the one into
+the other would destroy the only honest record of how each expression got there.
+
+Its output is three numbers, always printed together:
+
+| Result | What it means |
+|---|---|
+| **Proven equal** | The oracle evaluated both sides over landed rows at a real grain and got the same answer. |
+| **Proven to disagree** | The two sides produce **different numbers**. This is the strongest negative finding the tool can make — measured, not inferred — so it **fails the run** (exit code `3`) and prints both values and the grain. |
+| **Not proven either way** | Translated, but outside the oracle's subset, or no rows landed. **Unchecked, not broken** — it never fails a build. |
+
+Expect the proven count to start low on a real estate; the subset is narrow by design. **A low
+proven count is a limit of the checker — it is not evidence the translations are wrong, and not
+evidence they are right.**
+
+When a precondition fails, the summary says so in words instead of printing a zero, because a
 silent `0 verified` reads like a check that passed. **Coverage percentages describe translation, not
 verified equivalence.** Calculation review stays a required human step.
 

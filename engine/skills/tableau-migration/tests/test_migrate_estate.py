@@ -1685,6 +1685,97 @@ def test_summary_semantic_counts_are_zero_when_nothing_was_linted():
     assert s["semantics_kinds"] == {}
 
 
+def _sweep(checked=3, verified=2, unproven=0, disagreements=(), reasons=None):
+    return {"ok": not disagreements, "checked": checked, "verified": verified,
+            "unproven": unproven, "disagreements": list(disagreements),
+            "verified_objects": [], "unproven_reasons": dict(reasons or {})}
+
+
+def _disagreement(obj="Profit Ratio"):
+    return {"object": obj, "table": "Orders", "role": "measure", "grain": "Region=West",
+            "tableau_value": 0.25, "candidate_value": 0.4, "rows": 100,
+            "detail": "values differ", "tableau_formula": "SUM([P])/SUM([S])", "dax": "..."}
+
+
+def test_a_proven_wrong_number_fails_the_definition_of_done():
+    # Every other gate here infers a problem from structure. This one MEASURED it: the oracle
+    # evaluated both the Tableau formula and the generated DAX over the landed rows and got two
+    # different answers. It is the strongest finding the tool can produce, so it fails LOUD.
+    wb_details = [
+        {"name": "Clean WB", "pbip_status": "built", "bound_model": "M",
+         "translation_sweep": _sweep()},
+        {"name": "Wrong Numbers WB", "pbip_status": "built", "bound_model": "M",
+         "translation_sweep": _sweep(verified=1, disagreements=[_disagreement()])},
+        # consolidated path: the sweep lands on a datasource_pbips entry
+        {"name": "Wrong Consolidated", "pbip_status": "skipped",
+         "datasource_pbips": [{"datasource": "A", "pbip_status": "built"},
+                              {"datasource": "B", "pbip_status": "built",
+                               "translation_sweep": _sweep(disagreements=[_disagreement("Margin")])}]},
+    ]
+    dod = me._definition_of_done(wb_details, pbip_enabled=True)
+
+    assert dod["status"] == "failed"
+    by_name = {e["workbook"]: e for e in dod["workbooks"]}
+    assert by_name["Clean WB"]["status"] == "pass"
+    assert by_name["Wrong Numbers WB"]["status"] == "failed"
+    reason = by_name["Wrong Numbers WB"]["reason"]
+    # both values and the grain are in the reason -- a caller must be able to reproduce the claim
+    # without opening report.json
+    assert "Profit Ratio" in reason and "Region=West" in reason
+    assert "0.25" in reason and "0.4" in reason
+    assert by_name["Wrong Consolidated"]["status"] == "failed"
+    assert "Margin" in by_name["Wrong Consolidated"]["reason"]
+
+
+def test_unproven_translations_never_fail_the_build():
+    # An expression the oracle could not decide is UNCHECKED, not broken. Grading the build down for
+    # the checker's own coverage limits would punish the tool for being honest about what it did not
+    # verify -- and would make the hard gate mean two different things.
+    dod = me._definition_of_done(
+        [{"name": "WB", "pbip_status": "built", "bound_model": "M",
+          "translation_sweep": _sweep(checked=40, verified=0, unproven=40,
+                                      reasons={"expression is outside the oracle's supported "
+                                               "subset": 40})}],
+        pbip_enabled=True)
+
+    assert dod["status"] == "pass"
+    assert me._dod_numeric_disagreement({"translation_sweep": _sweep(checked=40, unproven=40)}) is None
+
+
+def test_dod_numeric_disagreement_helper_tolerates_missing_and_malformed():
+    assert me._dod_numeric_disagreement({"name": "X"}) is None
+    assert me._dod_numeric_disagreement({"translation_sweep": None}) is None
+    assert me._dod_numeric_disagreement({"translation_sweep": {"disagreements": []}}) is None
+    assert me._dod_numeric_disagreement({"translation_sweep": {"disagreements": [None, "x"]}}) is None
+    assert me._dod_numeric_disagreement({"datasource_pbips": [None]}) is None
+
+
+def test_summary_rolls_up_translation_sweep_counts():
+    ds = [{"name": "DS", "translation_sweep": _sweep(checked=5, verified=4, unproven=1,
+                                                     reasons={"no landed data": 1})}]
+    wb = [{"name": "WB", "datasource_pbips": [
+        {"translation_sweep": _sweep(checked=2, verified=0, unproven=1,
+                                     disagreements=[_disagreement()],
+                                     reasons={"no landed data": 3})}]}]
+    s = me._summarize(ds, wb, viz_available=True)
+
+    assert s["sweep_checked"] == 7
+    assert s["sweep_verified"] == 4
+    assert s["sweep_unproven"] == 2
+    assert s["sweep_disagreements"] == 1
+    assert s["sweep_disagreement_detail"][0]["object"] == "Profit Ratio"
+    # reasons accumulate across BOTH the datasource and workbook paths
+    assert s["sweep_unproven_reasons"] == {"no landed data": 4}
+
+
+def test_summary_sweep_counts_are_zero_when_nothing_was_swept():
+    # "Nothing was checked" and "everything checked out" must never render as the same number.
+    s = me._summarize([{"name": "DS"}], [{"name": "A"}], viz_available=True)
+    assert (s["sweep_checked"], s["sweep_verified"], s["sweep_unproven"]) == (0, 0, 0)
+    assert s["sweep_disagreements"] == 0
+    assert s["sweep_unproven_reasons"] == {}
+
+
 
     # A hard failure still wins over a fidelity warning (failed > warn).
     mixed = me._definition_of_done(

@@ -761,8 +761,74 @@ def _resolve_viz_stage(injected):
     return None
 
 
+def _landed_csvs_under(root):
+    """Map ``{table_name: csv_path}`` for every CSV landed under ``root``.
+
+    The workbook path lands its data in more than one place -- a sibling datasource's earlier
+    materialization, the shared ``<output>/data/<model>`` folder, or inside the project itself -- so
+    the callers pass each candidate root rather than guessing one. Scoped to the roots this model
+    actually wrote to, deliberately NOT a walk of the whole output bundle: a stem collision with an
+    unrelated workbook's table would feed the oracle the wrong rows and could manufacture a false
+    disagreement, and a false accusation is worse here than a missed check. First match per stem
+    wins; never raises.
+    """
+    found = {}
+    try:
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in files:
+                if fn.lower().endswith(".csv"):
+                    found.setdefault(os.path.splitext(fn)[0], os.path.join(dirpath, fn))
+    except OSError:
+        return None
+    return found or None
+
+
+def _sweep_translations_for(report, descriptor, table_csv_paths):
+    """Reconcile a freshly built model's DETERMINISTIC DAX against its Tableau source, over landed rows.
+
+    Opt-in (``-Verify``) because it loads every landed CSV and evaluates two expression trees per
+    measure -- real work a default offline convert should not pay for. Returns ``None`` when there is
+    nothing to reconcile against (no landed CSVs), which is a different fact from "checked and clean"
+    and is reported as such rather than as a zero.
+
+    The resolver is what makes the TABLEAU side evaluable at all: it maps a field caption in the
+    original formula onto the model column that caption became. Without it nearly everything comes
+    back unproven, so a resolver failure is worth nothing more than skipping -- never a false pass.
+    Never raises; a failure here leaves the build untouched.
+    """
+    if not table_csv_paths:
+        return None
+    try:
+        try:
+            from .translation_sweep import sweep_translations as _sweep, align_table_names as _align
+            from .connection_to_m import build_m_field_resolver as _bmfr
+        except ImportError:
+            from translation_sweep import sweep_translations as _sweep, align_table_names as _align
+            from connection_to_m import build_m_field_resolver as _bmfr
+    except Exception:
+        return None
+    try:
+        resolver = _bmfr(descriptor) if descriptor is not None else None
+    except Exception:
+        resolver = None
+    # A .hyper extract lands as ``Extract_<Table>_<guid>.csv`` while the DAX says ``'Orders'``. Alias
+    # the landed files onto the model's own table names or the oracle finds no rows for anything.
+    try:
+        _tables = sorted({str(c.get("model_table")) for c in
+                          ((report.get("model_manifest") or {}).get("columns") or [])
+                          if isinstance(c, dict) and c.get("model_table")})
+        table_csv_paths = _align(table_csv_paths, _tables)
+    except Exception:
+        pass
+    try:
+        return _sweep(report.get("measures"), report.get("calc_columns"),
+                      table_csv_paths=table_csv_paths, resolver=resolver)
+    except Exception:
+        return None
+
+
 def _migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir=None, ds_catalog=None,
-                            approved_calc_dax=None, copilot_ready=True):
+                            approved_calc_dax=None, copilot_ready=True, verify=False):
     """Drive the full per-datasource pipeline. Returns a report detail dict (never raises).
 
     When ``ds_catalog`` is given, a successfully migrated datasource records its source text +
@@ -991,6 +1057,11 @@ def _migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir=None, 
         # a datasource-only estate, or a workbook whose .pbip was skipped for a storage decision,
         # still emits a semantic model full of DAX, and it deserves the same check.
         semantics_lint=report.get("semantics_lint"),
+        # Opt-in (-Verify) empirical check of the SAME DAX against the Tableau formula it came from,
+        # evaluated over the rows landed on disk. The lint above asks whether the expression is well
+        # formed; this asks whether it produces the right number. None when nothing landed.
+        translation_sweep=_sweep_translations_for(report, descriptor, table_csv_paths) if verify
+        else None,
         tables=report.get("tables", []),
         skipped_tables=report.get("skipped_tables", []),
         partitions_needs_review=report.get("partitions_needs_review", []),
@@ -2200,7 +2271,7 @@ def _archive_bundles_legacy_tde(wb_id):
 def _build_datasource_pbip(entry, wb_detail, twb_text, result, ds, *, label, model_safe, dest,
                            folder_rel, report_base, viz_name, viz=None, ds_catalog=None,
                            approved_calc_dax=None, wb_id=None, pbip_dir=None,
-                           descriptor=None, combine_datasources=None):
+                           descriptor=None, combine_datasources=None, verify=False):
     """Rebuild ONE embedded datasource into a self-contained ``.pbip`` and record it on ``entry``.
 
     Extracted verbatim from ``_attach_workbook_pbip`` so a workbook with several embedded datasources
@@ -2515,6 +2586,28 @@ def _build_datasource_pbip(entry, wb_detail, twb_text, result, ds, *, label, mod
     _semantics = res_report.get("semantics_lint")
     if isinstance(_semantics, dict):
         entry["semantics_lint"] = _semantics
+    # Opt-in (-Verify) empirical counterpart: the lint above asks whether the DAX is well formed, this
+    # asks whether it produces the RIGHT NUMBER -- by re-parsing the original Tableau formula and the
+    # generated DAX and evaluating both over the rows landed beside this project. Only meaningful when
+    # rows actually landed, so it is None on a live-connection workbook.
+    if verify:
+        # The single-datasource branch parses its descriptor inside the model builder, so re-parse it
+        # here for the field resolver -- without one the Tableau side of every pair is unresolvable and
+        # the whole sweep would report unproven for the wrong reason. Data is discovered on disk under
+        # the project just written, which covers both the bundled-extract and reused-sibling cases.
+        _desc = descriptor
+        if _desc is None:
+            try:
+                _desc = parse_tds(twb_text, label)
+            except Exception:
+                _desc = None
+        _csvs = dict(local_data or {})
+        for _root in (dest, _ff_dest):
+            if _root:
+                _csvs.update(_landed_csvs_under(_root) or {})
+        _sweep = _sweep_translations_for(res_report, _desc, _csvs or None)
+        if _sweep is not None:
+            entry["translation_sweep"] = _sweep
     # Honest disclosure (additive): any island that landed as a needs-review M partition scaffold
     # (an unmapped connector consolidated alongside mapped ones) is surfaced here so a stubbed-not-
     # dropped table is visible at the estate level -- for a consolidated workbook the model is built
@@ -2525,7 +2618,7 @@ def _build_datasource_pbip(entry, wb_detail, twb_text, result, ds, *, label, mod
 
 
 def _attach_workbook_pbip(detail, twb_text, result, safe_base, pbip_dir, viz=None, ds_catalog=None,
-                          approved_calc_dax=None, wb_id=None):
+                          approved_calc_dax=None, wb_id=None, verify=False):
     """Build ONE openable, self-contained workbook ``.pbip`` project and record it on ``detail``.
 
     Every embedded datasource in the workbook is rebuilt into a SINGLE semantic model. A workbook with
@@ -2576,7 +2669,8 @@ def _attach_workbook_pbip(detail, twb_text, result, safe_base, pbip_dir, viz=Non
                                model_safe=model_safe, dest=os.path.join(pbip_dir, safe_base),
                                folder_rel=f"pbip/{safe_base}/{safe_base}.pbip", report_base=safe_base,
                                viz_name=viz_name, viz=viz, ds_catalog=ds_catalog,
-                               approved_calc_dax=approved_calc_dax, wb_id=wb_id, pbip_dir=pbip_dir)
+                               approved_calc_dax=approved_calc_dax, wb_id=wb_id, pbip_dir=pbip_dir,
+                               verify=verify)
         return
 
     # MULTIPLE embedded datasources: rebuild ALL of them into ONE semantic model as disconnected table
@@ -2611,7 +2705,7 @@ def _attach_workbook_pbip(detail, twb_text, result, safe_base, pbip_dir, viz=Non
                            folder_rel=f"pbip/{safe_base}/{safe_base}.pbip", report_base=safe_base,
                            viz_name=viz_name, viz=viz, ds_catalog=ds_catalog,
                            approved_calc_dax=approved_calc_dax, wb_id=wb_id, pbip_dir=pbip_dir,
-                           descriptor=combined, combine_datasources=all_ds)
+                           descriptor=combined, combine_datasources=all_ds, verify=verify)
 
 
 def _attach_viz_advice(detail, result, safe_base, reports_dir):
@@ -2641,7 +2735,7 @@ def _attach_viz_advice(detail, result, safe_base, reports_dir):
 
 
 def _migrate_one_workbook(source, wb_id, viz, reports_dir, used_folders, pbip_dir=None,
-                          ds_catalog=None, approved_calc_dax=None, viz_advice=False):
+                          ds_catalog=None, approved_calc_dax=None, viz_advice=False, verify=False):
     """Run the optional viz stage for one workbook. Returns a report detail dict (never raises).
 
     Beyond the back-compatible bare ``reports/<Name>.Report`` write, when ``pbip_dir`` is given the
@@ -2721,7 +2815,8 @@ def _migrate_one_workbook(source, wb_id, viz, reports_dir, used_folders, pbip_di
 
     if parts and pbip_dir is not None:
         _attach_workbook_pbip(detail, text, result, safe_base, pbip_dir, viz=viz,
-                              ds_catalog=ds_catalog, approved_calc_dax=approved_calc_dax, wb_id=wb_id)
+                              ds_catalog=ds_catalog, approved_calc_dax=approved_calc_dax,
+                              wb_id=wb_id, verify=verify)
     return detail
 
 
@@ -2969,7 +3064,7 @@ def migrate_workbook(source, *, write_to=None, wb_id=None, name=None, viz_stage=
 
     detail = _migrate_one_workbook(single, wb_id, viz, reports_dir, used_folders, pbip_dir,
                                    ds_catalog=ds_catalog, approved_calc_dax=approved_calc_dax,
-                                   viz_advice=viz_advice)
+                                   viz_advice=viz_advice, verify=bool(second_compile))
     if sc_detail is not None:
         detail["second_compile"] = sc_detail
     return detail
@@ -3344,7 +3439,8 @@ def migrate_estate(source, output_dir, *, viz_stage=None, pbip=True, rebind_plan
     ds_details = [_migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir,
                                           ds_catalog=ds_catalog,
                                           approved_calc_dax=approved_calc_dax,
-                                          copilot_ready=copilot_ready)
+                                          copilot_ready=copilot_ready,
+                                          verify=second_compile)
                   for ds_id in source.list_datasources()]
     wb_ids = list(source.list_workbooks())
     wb_details = [migrate_workbook(source, write_to=output_dir, wb_id=wb_id, viz_stage=viz,
@@ -3542,6 +3638,26 @@ def _summarize(ds_details, wb_details, viz_available):
             for _k, _n in (_lint.get("counts") or {}).items():
                 semantics_kinds[_k] = semantics_kinds.get(_k, 0) + int(_n or 0)
 
+    # Deterministic-translation sweep rollup (opt-in, -Verify). This is the counter that matters most
+    # and is the one most easily misread, so all three outcomes are reported side by side: proven
+    # equal, proven UNEQUAL, and could-not-decide. ``sweep_disagreements`` is the only estate-level
+    # number that means "this migration produces wrong values"; everything else is a coverage figure.
+    sweep_checked = sweep_verified = sweep_unproven = 0
+    sweep_disagreements = []
+    sweep_unproven_reasons = {}
+    for _d in list(ds_details) + list(wb_details):
+        _sweeps = [_d.get("translation_sweep")]
+        _sweeps += [(e or {}).get("translation_sweep") for e in (_d.get("datasource_pbips") or [])]
+        for _sw in _sweeps:
+            if not isinstance(_sw, dict):
+                continue
+            sweep_checked += int(_sw.get("checked") or 0)
+            sweep_verified += int(_sw.get("verified") or 0)
+            sweep_unproven += int(_sw.get("unproven") or 0)
+            sweep_disagreements.extend(_sw.get("disagreements") or [])
+            for _r, _n in (_sw.get("unproven_reasons") or {}).items():
+                sweep_unproven_reasons[_r] = sweep_unproven_reasons.get(_r, 0) + int(_n or 0)
+
     wb_built = sum(1 for w in wb_details if w.get("viz_status") == "built")
     wb_warned = sum(1 for w in wb_details if w.get("viz_status") == "warned")
     wb_error = sum(1 for w in wb_details if w.get("viz_status") == "error")
@@ -3609,6 +3725,12 @@ def _summarize(ds_details, wb_details, viz_available):
         "semantics_blocking": semantics_blocking,
         "semantics_advisory": semantics_advisory,
         "semantics_kinds": semantics_kinds,
+        "sweep_checked": sweep_checked,
+        "sweep_verified": sweep_verified,
+        "sweep_unproven": sweep_unproven,
+        "sweep_disagreements": len(sweep_disagreements),
+        "sweep_disagreement_detail": sweep_disagreements,
+        "sweep_unproven_reasons": sweep_unproven_reasons,
         "needs_review_total": needs_review_total,
         "partitions_stubbed_total": partitions_stubbed_total,
         "columns_pruned_hidden_total": columns_pruned_hidden_total,
@@ -3749,6 +3871,36 @@ def _dod_semantics_failure(w):
     return None
 
 
+def _dod_numeric_disagreement(w):
+    """A loud reason a workbook's model produces WRONG NUMBERS, or ``None`` when it does not.
+
+    Reads the opt-in ``translation_sweep``. A disagreement is the strongest negative finding this tool
+    can produce: the oracle re-parsed the original Tableau formula AND the generated DAX, evaluated
+    both over the rows on disk, and got different answers. Unlike every other check here that is not
+    an inference from structure -- it is measured. It fails LOUD.
+
+    ``unproven`` is pointedly NOT read. An expression the oracle could not decide is unchecked, not
+    broken, and grading a build down for the oracle's own coverage limits would punish honesty.
+    Read-only; tolerates a missing/malformed sweep; never raises.
+    """
+    sweeps = [w.get("translation_sweep")]
+    for e in (w.get("datasource_pbips") or []):
+        sweeps.append((e or {}).get("translation_sweep"))
+    for sw in sweeps:
+        if not isinstance(sw, dict):
+            continue
+        bad = [d for d in (sw.get("disagreements") or []) if isinstance(d, dict)]
+        if not bad:
+            continue
+        first = bad[0]
+        detail = "wrong number: %s at %s (Tableau=%r, generated DAX=%r)" % (
+            first.get("object") or "?", first.get("grain") or "grand total",
+            first.get("tableau_value"), first.get("candidate_value"))
+        extra = len(bad) - 1
+        return detail + (" -- and %d more" % extra if extra > 0 else "")
+    return None
+
+
 def _definition_of_done(wb_details, pbip_enabled):
     """A machine definition-of-done ledger for workbook inputs (additive; never raises).
 
@@ -3783,7 +3935,8 @@ def _definition_of_done(wb_details, pbip_enabled):
             status = "skipped"
             reason = "openable .pbip projects disabled (--no-pbip)"
         elif bound:
-            openability_fail = _dod_openability_failure(w) or _dod_semantics_failure(w)
+            openability_fail = (_dod_openability_failure(w) or _dod_semantics_failure(w)
+                                or _dod_numeric_disagreement(w))
             if openability_fail:
                 # A report bound to a structurally non-openable model is a LOUD failure -- it opens but
                 # will not load (e.g. a duplicate column survived to TMDL). Checked before warn/pass so
@@ -4494,6 +4647,21 @@ def main(argv=None):
             # needs a decision". Returning 0 here would let a pipeline publish an estate in which a
             # workbook never converted at all: the exact silent-wrong-answer this tool exists to stop.
             exit_code = 3
+    # A proven numeric disagreement is graded OUTSIDE the definition-of-done, which only classifies
+    # WORKBOOKS. A datasource-only estate has no workbook to fail, and "this model computes the wrong
+    # number" is the one finding that must never be reported quietly just because nobody rebuilt a
+    # dashboard. Measured, not inferred -- so it raises the exit code on its own.
+    _disagreements = s.get("sweep_disagreement_detail") or []
+    if _disagreements:
+        print(f"[FAIL] Numeric check: {len(_disagreements)} translation(s) were PROVEN to disagree "
+              f"with the original Tableau formula over the landed data.")
+        for _d in _disagreements[:10]:
+            print(f"       - {_d.get('object')}: at {_d.get('grain') or 'grand total'} "
+                  f"Tableau={_d.get('tableau_value')!r} vs generated DAX="
+                  f"{_d.get('candidate_value')!r}")
+        if len(_disagreements) > 10:
+            print(f"       ... and {len(_disagreements) - 10} more (see report.json)")
+        exit_code = 3
     return exit_code
 
 
