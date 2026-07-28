@@ -986,6 +986,11 @@ def _migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir=None, 
         output_folder=f"semantic_models/{folder}",
         pbip_folder=pbip_folder,
         translation_handoff=report.get("translation_handoff"),
+        # Static read of the DAX this build just generated (invalid expressions, and legal ones whose
+        # number is suspect). Carried onto the DATASOURCE detail as well as the workbook entry --
+        # a datasource-only estate, or a workbook whose .pbip was skipped for a storage decision,
+        # still emits a semantic model full of DAX, and it deserves the same check.
+        semantics_lint=report.get("semantics_lint"),
         tables=report.get("tables", []),
         skipped_tables=report.get("skipped_tables", []),
         partitions_needs_review=report.get("partitions_needs_review", []),
@@ -2503,6 +2508,13 @@ def _build_datasource_pbip(entry, wb_detail, twb_text, result, ds, *, label, mod
     _selfcheck = res_report.get("openability_selfcheck")
     if isinstance(_selfcheck, dict):
         entry["openability_selfcheck"] = _selfcheck
+    # Semantic sibling of the self-check above. A model can pass every structural gate and still carry
+    # DAX the engine rejects on evaluation (a measure in a CALCULATE compact filter) or DAX that is
+    # perfectly legal and simply reports the wrong number (a re-aggregated distinct count or ratio).
+    # Carried onto the same entry so the workbook definition-of-done can read both from one place.
+    _semantics = res_report.get("semantics_lint")
+    if isinstance(_semantics, dict):
+        entry["semantics_lint"] = _semantics
     # Honest disclosure (additive): any island that landed as a needs-review M partition scaffold
     # (an unmapped connector consolidated alongside mapped ones) is surfaced here so a stubbed-not-
     # dropped table is visible at the estate level -- for a consolidated workbook the model is built
@@ -3511,6 +3523,25 @@ def _summarize(ds_details, wb_details, viz_available):
             _reason = _ffd.get("reason") or "unknown"
             data_not_landed_reasons[_reason] = data_not_landed_reasons.get(_reason, 0) + 1
 
+    # Semantic-lint rollup over the GENERATED DAX. Unlike the numeric counters above this needs no
+    # landed data and no opt-in pass -- it is a static read of every expression this run emitted, so
+    # it reports on every run. ``blocking`` counts expressions the engine will reject on evaluation
+    # (these also fail the definition-of-done); ``advisory`` counts legal DAX whose NUMBER is suspect.
+    # ``kinds`` keeps the per-defect breakdown so a reader sees WHICH class was hit, not just a total.
+    semantics_checked = semantics_blocking = semantics_advisory = 0
+    semantics_kinds = {}
+    for _d in list(ds_details) + list(wb_details):
+        _lints = [_d.get("semantics_lint")]
+        _lints += [(e or {}).get("semantics_lint") for e in (_d.get("datasource_pbips") or [])]
+        for _lint in _lints:
+            if not isinstance(_lint, dict):
+                continue
+            semantics_checked += int(_lint.get("checked") or 0)
+            semantics_blocking += int(_lint.get("blocking") or 0)
+            semantics_advisory += int(_lint.get("advisory") or 0)
+            for _k, _n in (_lint.get("counts") or {}).items():
+                semantics_kinds[_k] = semantics_kinds.get(_k, 0) + int(_n or 0)
+
     wb_built = sum(1 for w in wb_details if w.get("viz_status") == "built")
     wb_warned = sum(1 for w in wb_details if w.get("viz_status") == "warned")
     wb_error = sum(1 for w in wb_details if w.get("viz_status") == "error")
@@ -3574,6 +3605,10 @@ def _summarize(ds_details, wb_details, viz_available):
         "calcs_numeric_unverified": calcs_numeric_unverified,
         "data_assets_landed": data_assets_landed,
         "data_not_landed_reasons": data_not_landed_reasons,
+        "semantics_checked": semantics_checked,
+        "semantics_blocking": semantics_blocking,
+        "semantics_advisory": semantics_advisory,
+        "semantics_kinds": semantics_kinds,
         "needs_review_total": needs_review_total,
         "partitions_stubbed_total": partitions_stubbed_total,
         "columns_pruned_hidden_total": columns_pruned_hidden_total,
@@ -3641,6 +3676,15 @@ def _dod_warn_reasons(w):
     parts = w.get("partitions_needs_review") or []
     if parts:
         reasons.append(f"{len(parts)} table(s) landed as a needs-review partition stub")
+    # Advisory DAX findings: legal expressions over a model that loads, but whose NUMBER is suspect
+    # (a re-aggregated distinct count or ratio). Not a build failure -- a fidelity gap a human judges.
+    advisory = 0
+    for lint in [w.get("semantics_lint")] + [(e or {}).get("semantics_lint")
+                                             for e in (w.get("datasource_pbips") or [])]:
+        if isinstance(lint, dict):
+            advisory += int(lint.get("advisory") or 0)
+    if advisory:
+        reasons.append(f"{advisory} measure(s) re-aggregate a non-additive value (numbers need review)")
     return reasons
 
 
@@ -3673,6 +3717,38 @@ def _dod_openability_failure(w):
     return None
 
 
+def _dod_semantics_failure(w):
+    """A loud reason a workbook's bound model carries INVALID DAX, or ``None`` when it does not.
+
+    Reads the ``semantics_lint`` recorded on the workbook detail and on each ``datasource_pbips``
+    entry, and reports only its BLOCKING findings -- DAX the engine will reject once it evaluates the
+    measure (a measure used in a CALCULATE compact boolean filter, a duplicate measure name, a measure
+    shadowing a column). Those deserialize perfectly and pass every structural gate, so a run would
+    otherwise report a green PASS over a report that errors the moment a user opens the page.
+
+    ADVISORY findings are deliberately NOT read here. A re-aggregated distinct count is legal DAX
+    over a model that loads; it is a number a human must judge, not a build to fail. Those surface as
+    a fidelity warning instead, so the hard gate keeps meaning exactly one thing: this will not work.
+    Read-only; tolerates a missing/malformed lint (treated as no signal); never raises.
+    """
+    lints = [w.get("semantics_lint")]
+    for e in (w.get("datasource_pbips") or []):
+        lints.append((e or {}).get("semantics_lint"))
+    for lint in lints:
+        if not isinstance(lint, dict) or not lint.get("blocking"):
+            continue
+        blocking = [f for f in (lint.get("findings") or [])
+                    if isinstance(f, dict) and f.get("severity") == "blocking"]
+        if not blocking:
+            continue
+        first = blocking[0]
+        detail = "invalid DAX: %s (%s)" % (first.get("detail") or first.get("kind"),
+                                           first.get("object") or "?")
+        extra = len(blocking) - 1
+        return detail + (" -- and %d more" % extra if extra > 0 else "")
+    return None
+
+
 def _definition_of_done(wb_details, pbip_enabled):
     """A machine definition-of-done ledger for workbook inputs (additive; never raises).
 
@@ -3690,7 +3766,9 @@ def _definition_of_done(wb_details, pbip_enabled):
       report, a hard ``.pbip`` write failure (e.g. a Windows MAX_PATH violation, recorded as
       ``pbip_write_error`` and reported LOUD before the published carve-out so it is never masked), or a
       report bound to a structurally NON-OPENABLE model (the ``openability_selfcheck`` failed -- the
-      ``.pbip`` opens but will not load; see ``_dod_openability_failure``), which fails LOUD ahead of
+      ``.pbip`` opens but will not load; see ``_dod_openability_failure``), or a report bound to a
+      model carrying DAX the engine will reject on evaluation (a BLOCKING ``semantics_lint`` finding;
+      see ``_dod_semantics_failure``), which fails LOUD ahead of
       the warn/pass branch so a green PASS is never reported over a model that will not open.
 
     The overall status is ``not_applicable`` (no workbook inputs), then by precedence ``failed`` (any
@@ -3705,7 +3783,7 @@ def _definition_of_done(wb_details, pbip_enabled):
             status = "skipped"
             reason = "openable .pbip projects disabled (--no-pbip)"
         elif bound:
-            openability_fail = _dod_openability_failure(w)
+            openability_fail = _dod_openability_failure(w) or _dod_semantics_failure(w)
             if openability_fail:
                 # A report bound to a structurally non-openable model is a LOUD failure -- it opens but
                 # will not load (e.g. a duplicate column survived to TMDL). Checked before warn/pass so

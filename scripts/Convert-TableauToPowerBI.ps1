@@ -258,6 +258,21 @@ if s.get("numeric_verification_active"):
 else:
     print("  Numerically verified : none -- no calculation was evaluated against data.")
     print("                         Re-run with -Verify to check translations against landed rows.")
+# The static DAX read. Needs no landed data and no opt-in pass, so unlike the counters above it
+# reports on EVERY run. Two separate facts, deliberately not merged: DAX the engine will reject, and
+# DAX it will happily run to a wrong number.
+if s.get("semantics_checked"):
+    _blocking, _advisory = s.get("semantics_blocking", 0), s.get("semantics_advisory", 0)
+    if _blocking:
+        print(f"  Invalid DAX          : {_blocking} of {s['semantics_checked']} expression(s) will be"
+              f" rejected when the measure is evaluated -- see summary.md.")
+    if _advisory:
+        print(f"  Suspect numbers      : {_advisory} expression(s) re-aggregate a non-additive value"
+              f" (a distinct count or a ratio).")
+        print("                         Valid DAX -- the model loads -- but the total is likely wrong.")
+    if not _blocking and not _advisory:
+        print(f"  DAX checked          : {s['semantics_checked']} expression(s), no invalid DAX and no"
+              f" suspect re-aggregation found.")
 '@
     Invoke-Py '-c' $summaryScript $reportPath
 }

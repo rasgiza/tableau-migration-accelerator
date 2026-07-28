@@ -1605,6 +1605,86 @@ def test_dod_openability_failure_helper_tolerates_missing_and_ok():
     assert reason is not None and "typed_columns_declared" in reason
 
 
+def _blocking_lint(obj="Prior Year Sales"):
+    return {"ok": False, "checked": 4, "clean": 3, "blocking": 1, "advisory": 0,
+            "counts": {"compact_filter_with_measure": 1},
+            "findings": [{"object": obj, "table": "_Measures", "role": "measure",
+                          "kind": "compact_filter_with_measure", "severity": "blocking",
+                          "detail": "CALCULATE filter compares against measure [Target Year]"}]}
+
+
+def test_definition_of_done_invalid_dax_fails_loud():
+    # A model can pass EVERY structural gate and still carry DAX the engine rejects the moment it
+    # evaluates the measure -- the compact CALCULATE filter deserializes perfectly. That must fail
+    # LOUD like a non-openable model, not warn, and not pass in silence.
+    wb_details = [
+        {"name": "Clean WB", "pbip_status": "built", "bound_model": "M",
+         "openability_selfcheck": {"ok": True, "checks": {}, "issues": []}},
+        {"name": "Bad DAX WB", "pbip_status": "built", "bound_model": "M",
+         "openability_selfcheck": {"ok": True, "checks": {}, "issues": []},
+         "semantics_lint": _blocking_lint()},
+        # consolidated path: the lint lands on a datasource_pbips entry
+        {"name": "Bad DAX Consolidated", "pbip_status": "skipped",
+         "datasource_pbips": [{"datasource": "A", "pbip_status": "built"},
+                              {"datasource": "B", "pbip_status": "built",
+                               "semantics_lint": _blocking_lint("Growth %")}]},
+    ]
+    dod = me._definition_of_done(wb_details, pbip_enabled=True)
+
+    assert dod["status"] == "failed"
+    by_name = {e["workbook"]: e for e in dod["workbooks"]}
+    assert by_name["Clean WB"]["status"] == "pass"
+    assert by_name["Bad DAX WB"]["status"] == "failed"
+    assert "invalid DAX" in by_name["Bad DAX WB"]["reason"]
+    assert "Prior Year Sales" in by_name["Bad DAX WB"]["reason"]   # the concrete measure is named
+    assert by_name["Bad DAX Consolidated"]["status"] == "failed"
+    assert "Growth %" in by_name["Bad DAX Consolidated"]["reason"]
+
+
+def test_advisory_dax_findings_warn_but_never_fail():
+    # A re-aggregated distinct count is LEGAL DAX over a model that loads. It is a number a human
+    # must judge, so it belongs in the warn lane -- failing the build on it would make the hard gate
+    # mean two different things.
+    lint = {"ok": True, "checked": 3, "clean": 2, "blocking": 0, "advisory": 1,
+            "counts": {"countd_reaggregated": 1},
+            "findings": [{"object": "Total Customers", "kind": "countd_reaggregated",
+                          "severity": "advisory", "detail": "SUMX over a DISTINCTCOUNT measure"}]}
+    dod = me._definition_of_done(
+        [{"name": "WB", "pbip_status": "built", "bound_model": "M", "semantics_lint": lint}],
+        pbip_enabled=True)
+
+    assert dod["status"] == "warn"
+    assert "re-aggregate" in dod["workbooks"][0]["reason"]
+    assert me._dod_semantics_failure({"semantics_lint": lint}) is None
+
+
+def test_dod_semantics_failure_helper_tolerates_missing_and_malformed():
+    assert me._dod_semantics_failure({"name": "X"}) is None
+    assert me._dod_semantics_failure({"semantics_lint": None}) is None
+    assert me._dod_semantics_failure({"semantics_lint": {"ok": True, "blocking": 0}}) is None
+    # a blocking COUNT with no matching finding is not a reason to invent one
+    assert me._dod_semantics_failure({"semantics_lint": {"blocking": 2, "findings": []}}) is None
+
+
+def test_summary_rolls_up_semantic_lint_counts():
+    wb = [{"name": "A", "semantics_lint": _blocking_lint()},
+          {"name": "B", "datasource_pbips": [
+              {"semantics_lint": {"checked": 2, "blocking": 0, "advisory": 1,
+                                  "counts": {"ratio_reaggregated": 1}, "findings": []}}]}]
+    s = me._summarize([], wb, viz_available=True)
+
+    assert s["semantics_checked"] == 6
+    assert s["semantics_blocking"] == 1
+    assert s["semantics_advisory"] == 1
+    assert s["semantics_kinds"] == {"compact_filter_with_measure": 1, "ratio_reaggregated": 1}
+
+
+def test_summary_semantic_counts_are_zero_when_nothing_was_linted():
+    s = me._summarize([], [{"name": "A"}], viz_available=True)
+    assert (s["semantics_checked"], s["semantics_blocking"], s["semantics_advisory"]) == (0, 0, 0)
+    assert s["semantics_kinds"] == {}
+
+
 
     # A hard failure still wins over a fidelity warning (failed > warn).
     mixed = me._definition_of_done(

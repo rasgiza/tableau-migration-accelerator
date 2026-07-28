@@ -217,6 +217,7 @@ for the five public guides this aligns with.
 | "Data loads and dashboards light up" | Desktop **with a real live-connected workbook** | ⚠️ The bundled sample points at a **placeholder** source, so it raises a connect error *by design* — use a real workbook + source to see data |
 | "It lands live in Fabric" | **Fabric** (Stage 3) | ✅ Only this proves the end-to-end migration; needs your workspace + a data source |
 | "The numbers match Tableau" | `-Verify` (opt-in) | ⚠️ Only for calcs the oracle can evaluate over **landed** rows — [see below](#does-it-check-that-the-numbers-are-right) |
+| "The generated DAX is valid, and aggregates honestly" | Every run, automatically | ✅ Offline, no data needed — but it proves the *absence of specific defects*, not correctness — [see below](#what-the-dax-check-on-every-run-actually-catches) |
 
 > **The one caveat that trips people up:** the bundled `sample/Superstore.twb` is DirectQuery-bound
 > to a fake server on purpose (storage mode is [never auto-guessed](#how-does-it-handle-my-calculations-lod-expressions-parameters--custom-sql)).
@@ -245,6 +246,23 @@ Two preconditions decide whether it can report anything at all:
 When either precondition fails, the summary says so in words instead of printing a zero, because a
 silent `0 verified` reads like a check that passed. **Coverage percentages describe translation, not
 verified equivalence.** Calculation review stays a required human step.
+
+### What the DAX check on every run actually catches
+
+Separately from `-Verify`, every run statically reads the DAX it just generated. This needs no data,
+no tenant and no opt-in, so it always reports something — but it is a *narrow* check with a precise
+claim: it proves specific known defects are **absent**. It does not prove your numbers are right.
+
+It exists because two defect classes survive every structural check:
+
+| Class | Example | What the run does |
+|---|---|---|
+| **Invalid DAX** — deserializes perfectly, rejected when the measure is evaluated | A measure used inside a `CALCULATE` compact filter (`CALCULATE(…, 'Orders'[Year] = [Target Year])`); a measure whose name duplicates another, or shadows a column in its own table | **Fails the definition-of-done.** The `.pbip` would open and then error on the page — that is not a pass |
+| **Suspect numbers** — valid DAX, model loads, total is wrong | `SUMX` over a distinct-count measure; `AVERAGEX` over a ratio measure (averaging a ratio drops denominator weighting — the classic 103% KPI) | **Warns.** Legal DAX; a human judges the number. A build is never failed on it |
+
+The invalid-DAX checks are deliberately model-aware: a bare `[Name]` is only treated as a measure
+reference when *this run emitted a measure by that name*, so a legal `FILTER()` predicate, a
+table-qualified column, or a name the run knows nothing about is never flagged.
 
 ## Opening the `.pbip` in Power BI Desktop — prerequisites & troubleshooting
 

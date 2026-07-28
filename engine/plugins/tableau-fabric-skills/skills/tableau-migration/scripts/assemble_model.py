@@ -77,6 +77,7 @@ try:  # package or scripts-on-path
     from .workbook_table_calcs import extract_table_calc_usages
     from .date_window_flag import build_date_window_flags
     from .openability_gate import check_model_openability
+    from .dax_semantics_lint import lint_model_semantics
     from . import linguistic as L
 except ImportError:
     from connection_to_m import (
@@ -125,6 +126,7 @@ except ImportError:
     from workbook_table_calcs import extract_table_calc_usages
     from date_window_flag import build_date_window_flags
     from openability_gate import check_model_openability
+    from dax_semantics_lint import lint_model_semantics
     import linguistic as L
 
 
@@ -2927,6 +2929,15 @@ def assemble_import_model(descriptor, *, model_name, calcs=None, dim_calcs=None,
         report["flatfile_header_reconcile"] = header_reconcile
     report["openability_selfcheck"] = check_model_openability(
         parts, flatfile_headers=_gate_flatfile_headers(descriptor, flatfile_path))
+    # Semantic sibling of the openability self-check. That gate asks "will this model OPEN?"; this one
+    # asks "is the DAX it opens with actually valid, and does it aggregate honestly?" -- the defect
+    # classes that deserialize perfectly and only bite once Desktop evaluates a measure (a measure in a
+    # CALCULATE compact filter, a name collision) or that never bite at all and just report the wrong
+    # number (a re-aggregated distinct count or ratio). Reads the measure/calc-column reports, which
+    # hold the Tableau formula and generated DAX side by side, plus the manifest for the column surface.
+    report["semantics_lint"] = lint_model_semantics(
+        measure_report, calc_column_report=calc_column_report,
+        model_manifest=report["model_manifest"])
     # Copilot-readiness (opt-in): Power BI Q&A / Copilot map a user's vocabulary onto model fields
     # through a ``cultureInfo`` linguistic-synonyms part. When ``copilot_ready`` is set, harvest the
     # Tableau field captions that differ from their model column names into an ``en-US`` culture and
