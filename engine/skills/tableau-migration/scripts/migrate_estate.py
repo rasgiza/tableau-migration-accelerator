@@ -4341,14 +4341,28 @@ def main(argv=None):
               f"completion -> see summary.md ('manual M partition completion'); the original SQL "
               f"is preserved in report.json.")
     dod = report.get("definition_of_done") or {}
+    exit_code = 0
     if dod.get("applicable"):
-        # ASCII markers only -- Windows cp1252 stdout raises on emoji. Soft-but-loud: exit stays 0.
+        # ASCII markers only -- Windows cp1252 stdout raises on emoji.
         marker = {"failed": "[FAIL]", "pass": "[OK]", "warn": "[WARN]",
                   "skipped": "[--]"}.get(dod.get("status"), "[--]")
         print(f"{marker} Definition of done: {dod.get('status')} -- {dod.get('reports_bound', 0)}/"
               f"{dod.get('workbooks_total', 0)} workbook report(s) rebuilt and bound "
               f"(see summary.md).")
-    return 0
+        if dod.get("status") == "failed":
+            # Name the workbooks that did NOT land, with the reason, right here. A caller should
+            # never have to open summary.md to find out WHICH workbook needs a decision -- and in
+            # a pipeline there is no one reading summary.md at all.
+            for entry in dod.get("workbooks") or []:
+                if entry.get("status") == "failed":
+                    print(f"       - {entry.get('workbook')}: {entry.get('reason')}")
+            # Exit 3 == "the run completed but a human decision is required". Deliberately distinct
+            # from 2, which the preflight [STOP] guards already use for "refused to run" (bad input,
+            # empty estate, stale output) -- a caller must be able to tell "nothing ran" from "ran,
+            # needs a decision". Returning 0 here would let a pipeline publish an estate in which a
+            # workbook never converted at all: the exact silent-wrong-answer this tool exists to stop.
+            exit_code = 3
+    return exit_code
 
 
 if __name__ == "__main__":

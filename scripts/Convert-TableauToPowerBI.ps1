@@ -168,9 +168,23 @@ def g(*k):
     for key in k:
         if key in s: return s[key]
     return "-"
-print(f"  Datasources migrated : {g('datasources_migrated')}")
-print(f"  Measures translated  : {g('measures_translated')} / {g('measures_total')}")
-print(f"  Measures stubbed     : {g('measures_stubbed')}  (need review)")
+# Show a counter only when it has a denominator. Printing "Measures translated: 0 / 0" for an
+# estate of embedded-datasource workbooks reads as total failure when the real coverage lives in
+# the workbook-calc counters -- so pick whichever counters this estate actually populated.
+if s.get("datasources_total"):
+    print(f"  Datasources migrated : {g('datasources_migrated')} / {g('datasources_total')}")
+if s.get("measures_total"):
+    print(f"  Measures translated  : {g('measures_translated')} / {g('measures_total')}")
+    print(f"  Measures stubbed     : {g('measures_stubbed')}  (need review)")
+if s.get("workbook_calcs_total"):
+    print(f"  Workbook calcs       : {g('workbook_calcs_translated')} / {g('workbook_calcs_total')}"
+          f" translated ({g('workbook_calcs_coverage_pct')}% coverage)")
+    print(f"  ...flagged for review: {g('workbook_calcs_needs_review')}")
+if s.get("workbooks_total"):
+    # "reports bound" (not "workbooks converted") -- a datasource-only estate still emits an
+    # openable .pbip, so "0 / 1 converted" would contradict the "Open in Power BI Desktop" path
+    # printed just below. This counter means the same thing the definition-of-done gate reports.
+    print(f"  Workbook reports bound: {g('workbooks_pbip_built')} / {g('workbooks_total')}")
 print(f"  Visuals rebuilt      : {g('visuals_rebuilt')}")
 '@
     Invoke-Py '-c' $summaryScript $reportPath
@@ -193,5 +207,8 @@ if ($buildExit -ne 0) {
     Write-Host "`n  Note: the definition-of-done gate flagged a human decision" -ForegroundColor Yellow
     Write-Host "  (e.g. storage mode Import vs DirectLake). The model + calc→DAX" -ForegroundColor Yellow
     Write-Host "  still generated; see summary.md for the exact item to resolve." -ForegroundColor Yellow
+    Write-Host "  Exit code $buildExit (3 = human decision required, 2 = refused to run)." -ForegroundColor Yellow
 }
-exit 0
+# Propagate the engine's status. Exiting 0 unconditionally would hide an unconverted workbook from
+# any caller that checks $LASTEXITCODE -- CI, a scheduled run, or a customer's pipeline.
+exit $buildExit

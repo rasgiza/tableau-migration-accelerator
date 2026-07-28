@@ -1475,7 +1475,7 @@ def test_definition_of_done_not_applicable_for_datasource_only_run(tmp_path):
 
 
 def test_definition_of_done_main_exits_zero_with_workbook(tmp_path, capsys):
-    # main() wires the gate and prints a loud one-liner, but exit status is unchanged (soft-but-loud).
+    # A gate that PASSES exits 0 -- only a `failed` gate changes the exit status (see the test below).
     src_dir = tmp_path / "in"
     src_dir.mkdir()
     (src_dir / "Exec Dashboard.twb").write_text(SUPERSTORE_DASHBOARD_TWB, encoding="utf-8")
@@ -1486,6 +1486,34 @@ def test_definition_of_done_main_exits_zero_with_workbook(tmp_path, capsys):
     printed = capsys.readouterr().out
     assert "definition of done" in printed.lower()
     assert (out_dir / "summary.md").read_text(encoding="utf-8").count("DEFINITION OF DONE") >= 1
+
+
+def test_definition_of_done_main_exits_three_and_names_failed_workbook(tmp_path, capsys, monkeypatch):
+    # A failed gate MUST be machine-detectable. In a pipeline nobody opens summary.md, so exiting 0
+    # would let a caller publish an estate in which a workbook never converted. Exit 3 means "run
+    # completed, human decision required" and stays distinct from 2 (preflight [STOP], nothing ran).
+    src_dir = tmp_path / "in"
+    src_dir.mkdir()
+    (src_dir / "Exec Dashboard.twb").write_text(SUPERSTORE_DASHBOARD_TWB, encoding="utf-8")
+    out_dir = tmp_path / "out"
+
+    real_dod = me._definition_of_done
+
+    def _force_failed(*args, **kwargs):
+        dod = real_dod(*args, **kwargs)
+        dod["status"] = "failed"
+        dod["workbooks"] = [{"workbook": "Exec Dashboard", "status": "failed",
+                             "reason": "embedded datasource needs a storage decision"}]
+        return dod
+
+    monkeypatch.setattr(me, "_definition_of_done", _force_failed)
+
+    rc = me.main(["-i", str(src_dir), "-o", str(out_dir)])
+    assert rc == 3
+    printed = capsys.readouterr().out
+    assert "[FAIL] Definition of done" in printed
+    # the failing workbook is named on the console, with its reason -- not hidden in summary.md
+    assert "Exec Dashboard: embedded datasource needs a storage decision" in printed
 
 
 # Defect E -- a workbook that BUILDS an openable .pbip is NOT automatically faithful. If it stubbed a
@@ -2612,10 +2640,15 @@ def test_rerun_clears_stale_semantic_model(fixtures_dir, tmp_path):
 
 
 # -- CLI ----------------------------------------------------------------------
+# NOTE on exit codes below: the shared `fixtures_dir` estate legitimately FAILS the definition-of-
+# done gate -- widget_dashboard.twb has no embedded datasource, so its report is never bound to a
+# local model. A full build over these fixtures therefore exits 3 ('completed, human decision
+# required'), not 0. Asserting 3 keeps that honest; asserting 0 would re-hide the unbound workbook.
+
 def test_cli_main_runs_offline(fixtures_dir, tmp_path, capsys):
     out = str(tmp_path / "b")
     rc = me.main(["-i", fixtures_dir, "-o", out])
-    assert rc == 0
+    assert rc == 3
     assert os.path.isfile(os.path.join(out, "report.json"))
     assert os.path.isdir(os.path.join(out, "pbip"))  # pbip projects emitted by default
     printed = capsys.readouterr().out
@@ -2625,6 +2658,8 @@ def test_cli_main_runs_offline(fixtures_dir, tmp_path, capsys):
     assert "Machine-readable facts:" in printed
     assert "Openable projects:" in printed  # pbip hint surfaced
     assert "Next step:" in printed          # stubbed-calc check-in surfaced (widget_sales stubs one)
+    # the unbound workbook is named on the console, not just counted
+    assert "widget_dashboard" in printed
 
 
 def test_cli_main_no_pbip_flag_suppresses_projects(fixtures_dir, tmp_path, capsys):
@@ -2665,12 +2700,12 @@ def test_cli_stops_on_empty_input_folder(tmp_path, capsys):
 
 def test_cli_refuses_plain_rebuild_over_existing_report(fixtures_dir, tmp_path, capsys):
     out = str(tmp_path / "b")
-    assert me.main(["-i", fixtures_dir, "-o", out]) == 0
+    assert me.main(["-i", fixtures_dir, "-o", out]) == 3   # built; gate needs a decision
     original = open(os.path.join(out, "report.json"), "rb").read()
     capsys.readouterr()  # drop the first build's output
 
     rc = me.main(["-i", fixtures_dir, "-o", out])  # plain rebuild into the SAME dir
-    assert rc == 2
+    assert rc == 2                                  # refused to run -- distinct from the gate's 3
     printed = capsys.readouterr().out
     assert "[STOP]" in printed and "Refusing to build" in printed
     # Guard returns BEFORE the build, so the prior report.json is left untouched.
@@ -2679,22 +2714,22 @@ def test_cli_refuses_plain_rebuild_over_existing_report(fixtures_dir, tmp_path, 
 
 def test_cli_force_allows_rebuild_over_existing_report(fixtures_dir, tmp_path):
     out = str(tmp_path / "b")
-    assert me.main(["-i", fixtures_dir, "-o", out]) == 0
-    assert me.main(["-i", fixtures_dir, "-o", out, "--force"]) == 0
+    assert me.main(["-i", fixtures_dir, "-o", out]) == 3
+    assert me.main(["-i", fixtures_dir, "-o", out, "--force"]) == 3
     # --overwrite is an accepted alias for --force.
-    assert me.main(["-i", fixtures_dir, "-o", out, "--overwrite"]) == 0
+    assert me.main(["-i", fixtures_dir, "-o", out, "--overwrite"]) == 3
 
 
 def test_cli_approved_dax_rerun_into_existing_bundle_bypasses_guard(fixtures_dir, tmp_path):
     # The documented second-compiler loop: build, author approved DAX, re-run --approved-dax into
     # the SAME bundle to land it. That intentional re-run must NOT trip the stale-output guard.
     out = str(tmp_path / "b")
-    assert me.main(["-i", fixtures_dir, "-o", out]) == 0
+    assert me.main(["-i", fixtures_dir, "-o", out]) == 3
     approved_json = tmp_path / "approved.json"
     approved_json.write_text(json.dumps({"Running Amount": _APPROVED_RUNNING_AMOUNT_DAX}),
                              encoding="utf-8")
     rc = me.main(["-i", fixtures_dir, "-o", out, "--approved-dax", str(approved_json)])
-    assert rc == 0
+    assert rc == 3   # landed (no [STOP]); the gate still wants the unbound workbook resolved
     on_disk = json.load(open(os.path.join(out, "report.json"), encoding="utf-8"))
     detail = next(d for d in on_disk["datasources"] if d["name"] == "widget_sales")
     by_status = {m["measure"]: m["status"] for m in detail["measures"]}
@@ -2703,18 +2738,18 @@ def test_cli_approved_dax_rerun_into_existing_bundle_bypasses_guard(fixtures_dir
 
 def test_cli_second_compile_rerun_into_existing_bundle_bypasses_guard(fixtures_dir, tmp_path):
     out = str(tmp_path / "b")
-    assert me.main(["-i", fixtures_dir, "-o", out]) == 0
-    assert me.main(["-i", fixtures_dir, "-o", out, "--second-compile"]) == 0
+    assert me.main(["-i", fixtures_dir, "-o", out]) == 3
+    assert me.main(["-i", fixtures_dir, "-o", out, "--second-compile"]) == 3
 
 
 def test_cli_scan_not_blocked_by_existing_report(fixtures_dir, tmp_path, capsys):
     # --scan is read-only pre-build discovery; it legitimately writes scan.json into a folder that
     # already holds a prior report.json and must never be caught by the build guard.
     out = str(tmp_path / "b")
-    assert me.main(["-i", fixtures_dir, "-o", out]) == 0
+    assert me.main(["-i", fixtures_dir, "-o", out]) == 3
     capsys.readouterr()
     rc = me.main(["-i", fixtures_dir, "-o", out, "--scan"])
-    assert rc == 0  # fixtures have no missing published datasource
+    assert rc == 0  # fixtures have no missing published datasource; --scan runs no build gate
     assert "[STOP]" not in capsys.readouterr().out
     assert os.path.isfile(os.path.join(out, "scan.json"))
 
@@ -3018,7 +3053,7 @@ def test_main_approved_dax_flag_lands_via_cli(fixtures_dir, tmp_path):
                              encoding="utf-8")
 
     rc = me.main(["-i", fixtures_dir, "-o", out, "--approved-dax", str(approved_json)])
-    assert rc == 0
+    assert rc == 3   # measure landed; the gate still flags the unbound widget_dashboard
 
     on_disk = json.load(open(os.path.join(out, "report.json"), encoding="utf-8"))
     detail = next(d for d in on_disk["datasources"] if d["name"] == "widget_sales")
