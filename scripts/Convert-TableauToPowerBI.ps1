@@ -41,6 +41,15 @@
     The oracle only proves the subset it can evaluate, so expect some calcs to come back
     unverified — that is the honest answer, not a failure.
 
+    Two preconditions decide whether it can report anything at all. First, rows must
+    have LANDED: a workbook whose data is a bundled .hyper extract needs the optional
+    Tableau Hyper API (pip install tableauhyperapi) — without it nothing is written to
+    disk and there is nothing to evaluate against. Second, the oracle currently examines
+    the calculations recovered by the second-compiler pass, not the ones the deterministic
+    pass already translated, so a model whose calcs all translated on the first pass
+    reports "nothing in scope". Both cases are stated explicitly in the summary rather
+    than reported as a silent zero.
+
 .EXAMPLE
     .\Convert-TableauToPowerBI.ps1 -Input .\sample\Superstore.twb
 
@@ -211,6 +220,21 @@ if s.get("workbooks_total"):
     # printed just below. This counter means the same thing the definition-of-done gate reports.
     print(f"  Workbook reports bound: {g('workbooks_pbip_built')} / {g('workbooks_total')}")
 print(f"  Visuals rebuilt      : {g('visuals_rebuilt')}")
+# Landed rows are the PRECONDITION for numeric verification -- the oracle evaluates both sides of a
+# translation over real data, so an estate that lands nothing can never be verified however many
+# calcs translate. Report the precondition and its cause; an unexplained "nothing was in scope"
+# leaves the reader guessing whether the check passed or never happened.
+landed = s.get("data_assets_landed", 0)
+not_landed = s.get("data_not_landed_reasons") or {}
+_why = {
+    "hyperapi_unavailable": "a .hyper extract is bundled but no Hyper reader is installed --"
+                            " pip install tableauhyperapi (no Windows ARM64 build is published)",
+    "no_bundled_data": "neither the source file nor a .hyper extract is bundled --"
+                       " re-export from Tableau with the extract included",
+    "not_a_package": "no bundled data to land (a bare .twb/.tds, or a live connection)",
+}
+for reason, count in sorted(not_landed.items()):
+    print(f"  Data not landed      : {count} source(s) -- {_why.get(reason, reason)}")
 # Never let "translated" be read as "checked". Say which one this run actually did.
 if s.get("numeric_verification_active"):
     ver, unver = s.get("calcs_numeric_verified", 0), s.get("calcs_numeric_unverified", 0)
@@ -220,12 +244,17 @@ if s.get("numeric_verification_active"):
         if unver:
             print(f"  ...unproven          : {unver}  (outside the oracle's evaluable subset --"
                   f" translated, not verified)")
+    elif not landed:
+        # The check could not run at all. This is a different fact from "it ran and found nothing",
+        # and the customer's next action is different too -- land the data, then re-run.
+        print("  Numerically verified : nothing -- no rows were landed, so no calculation could be")
+        print("                         evaluated against data (see 'Data not landed' above).")
     else:
-        # Verification ran but had nothing to check: the second-compiler landed no new calcs, so
-        # every measure in this model came from the deterministic pass and none was data-checked.
-        # Saying "0 of 0 verified" would imply a check happened and found nothing wrong.
-        print("  Numerically verified : n/a -- verification ran, but no calculation in this model")
-        print("                         was in scope for it (nothing was checked against data).")
+        # Rows ARE on disk and the oracle ran, but no calculation was in its evaluable subset --
+        # every measure here came from the deterministic pass. Saying "0 of 0 verified" would imply
+        # a check happened and found nothing wrong.
+        print("  Numerically verified : n/a -- rows landed, but no calculation in this model was in")
+        print("                         scope for the oracle (nothing was checked against data).")
 else:
     print("  Numerically verified : none -- no calculation was evaluated against data.")
     print("                         Re-run with -Verify to check translations against landed rows.")

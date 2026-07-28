@@ -627,6 +627,15 @@ def _auto_select_storage_mode(descriptor):
 
     # 3. flat file -> Import (mode is correct; M is a path-based scaffold, not Sql.Database).
     if cls in FLAT_FILE_CLASSES:
+        # A flat-file source with an extract enabled almost always packages ONLY the .hyper -- the
+        # named Excel/CSV is absent from the archive, so ``flatfile_filename`` is None and nothing
+        # downstream engages the materializer. That is the most common Tableau Cloud shape, and
+        # without this marker its rows never land: the model opens empty and the reconciliation
+        # oracle has nothing to evaluate, so every translation stays unchecked. Deliberately a
+        # DIFFERENT marker from ``import_from_extract`` (branch 1.7): this one only engages
+        # materialization, it does NOT arm the fail-closed needs-decision fallback -- a machine
+        # without a Hyper reader must still get its model plus an honest "no rows landed" warning.
+        extract_marker = {"flatfile_from_extract": True} if descriptor.get("is_extract") else {}
         return _decision(
             "Import", FLAT_FILE_CLASSES[cls],
             fully_supported=False,
@@ -634,6 +643,7 @@ def _auto_select_storage_mode(descriptor):
             rationale=f"Flat-file source ({cls}) -> Import.",
             manual_followups=base_followups + [
                 f"Set the file path (and sheet/range) for the {FLAT_FILE_CLASSES[cls]} M partition."],
+            **extract_marker,
         )
 
     # 4. extract enabled -> Import snapshot; offer live alternative when the connector is live.

@@ -216,12 +216,35 @@ for the five public guides this aligns with.
 | "The model opens and its structure is correct" | Power BI **Desktop** (Stage 2) | ✅ Tables / columns / DAX are visible |
 | "Data loads and dashboards light up" | Desktop **with a real live-connected workbook** | ⚠️ The bundled sample points at a **placeholder** source, so it raises a connect error *by design* — use a real workbook + source to see data |
 | "It lands live in Fabric" | **Fabric** (Stage 3) | ✅ Only this proves the end-to-end migration; needs your workspace + a data source |
+| "The numbers match Tableau" | `-Verify` (opt-in) | ⚠️ Only for calcs the oracle can evaluate over **landed** rows — [see below](#does-it-check-that-the-numbers-are-right) |
 
 > **The one caveat that trips people up:** the bundled `sample/Superstore.twb` is DirectQuery-bound
 > to a fake server on purpose (storage mode is [never auto-guessed](#how-does-it-handle-my-calculations-lod-expressions-parameters--custom-sql)).
 > Opening it in Desktop shows a correct model but a **SQL connect error** — that is expected, not a
 > failure. To see data actually load with zero cloud setup, test with a **real live-connected
 > Tableau workbook** (one that points at a database you can reach) dropped in `workbooks/`.
+
+### Does it check that the numbers are right?
+
+In one specific, opt-in case — and it is worth stating exactly, because *translated* and *checked*
+are different claims.
+
+A calculation is reported as **translated** when its construct was mappable to DAX. Nothing in a
+default run evaluates it against data. Add `-Verify` and the run makes a second pass with a
+**reconciliation oracle**: it re-parses the original Tableau formula *and* the generated DAX through
+two independent front-ends, evaluates both over the rows actually landed on disk, and reports only
+the ones it can prove agree.
+
+Two preconditions decide whether it can report anything at all:
+
+| Precondition | What it means in practice |
+|---|---|
+| **Rows landed on disk** | A workbook whose data is a bundled `.hyper` extract — the usual Tableau Cloud export — needs the optional Tableau Hyper API (`pip install tableauhyperapi`). The core engine is stdlib-only and will not read extract data without it, and no Windows **ARM64** build of that package is published. No rows on disk means nothing to evaluate against. |
+| **The calc is in the oracle's scope** | It examines the calculations recovered by the second-compiler pass — not the ones the deterministic pass already translated — and within that, a supported subset: arithmetic over single-column aggregations on one table. |
+
+When either precondition fails, the summary says so in words instead of printing a zero, because a
+silent `0 verified` reads like a check that passed. **Coverage percentages describe translation, not
+verified equivalence.** Calculation review stays a required human step.
 
 ## Opening the `.pbip` in Power BI Desktop — prerequisites & troubleshooting
 

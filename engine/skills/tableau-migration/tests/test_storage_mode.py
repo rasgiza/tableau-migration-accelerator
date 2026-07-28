@@ -212,6 +212,21 @@ def test_flat_file_extract_stays_flatfile_not_import_from_extract():
     d = select_storage_mode(_desc(connection_class="excel-direct", is_extract=True))
     assert d["mode"] == "Import"
     assert not d.get("import_from_extract")
+    # ...but it MUST still be marked as extract-backed. This is the most common Tableau Cloud shape
+    # (Excel/CSV source, extract enabled) and the archive packages only the .hyper -- so there is no
+    # ``flatfile_filename`` and, without this marker, nothing downstream engages the materializer:
+    # the estate lands zero rows and every translation stays unverifiable. The marker is deliberately
+    # NOT ``import_from_extract`` so it engages materialization without arming the fail-closed
+    # needs-decision fallback.
+    assert d["flatfile_from_extract"] is True
+
+
+def test_flat_file_without_extract_carries_no_extract_marker():
+    # The marker must stay absent for a plain flat file, so it only ever widens the materializer's
+    # reach to sources that genuinely bundle an extract.
+    d = select_storage_mode(_desc(connection_class="excel-direct", server=None, database=None))
+    assert d["mode"] == "Import"
+    assert not d.get("flatfile_from_extract")
 
 
 # -- expanded connector dispatch ----------------------------------------------

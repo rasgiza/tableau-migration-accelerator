@@ -831,7 +831,10 @@ def _migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir=None, 
     flatfile_path = None
     table_csv_paths = None
     ff_mat = None
-    if descriptor.get("flatfile_filename") or decision.get("import_from_extract"):
+    # ``flatfile_from_extract`` covers the flat-file source whose archive packages ONLY the .hyper
+    # (no named Excel/CSV -> no ``flatfile_filename``). Without it that estate lands no rows at all.
+    if (descriptor.get("flatfile_filename") or decision.get("import_from_extract")
+            or decision.get("flatfile_from_extract")):
         if pbip_dir is not None:
             # Land the data INSIDE the openable project (pbip/<name>/<name>.Data, beside the
             # .SemanticModel) so the whole folder is self-contained + portable; a relocatable
@@ -3490,6 +3493,24 @@ def _summarize(ds_details, wb_details, viz_available):
         calcs_numeric_verified += int(sc.get("numeric_verified_count") or 0)
         calcs_numeric_unverified += int(sc.get("numeric_unverified_count") or 0)
 
+    # Data-landing rollup -- the PRECONDITION for any numeric verification. The reconciliation oracle
+    # evaluates both sides of a translation over landed rows, so an estate that lands nothing can
+    # never be verified no matter how many calcs translate. Reporting the precondition beats leaving
+    # a reader to infer it from a verification count of zero, which reads like a clean check.
+    # An asset with no ``flatfile_data`` at all (a live DB source) is counted in neither bucket --
+    # it has no bundled data to land, and that is not a failure.
+    data_assets_landed = 0
+    data_not_landed_reasons = {}
+    for _d in list(ds_details) + list(wb_details):
+        _ffd = _d.get("flatfile_data")
+        if not _ffd:
+            continue
+        if _ffd.get("landed"):
+            data_assets_landed += 1
+        else:
+            _reason = _ffd.get("reason") or "unknown"
+            data_not_landed_reasons[_reason] = data_not_landed_reasons.get(_reason, 0) + 1
+
     wb_built = sum(1 for w in wb_details if w.get("viz_status") == "built")
     wb_warned = sum(1 for w in wb_details if w.get("viz_status") == "warned")
     wb_error = sum(1 for w in wb_details if w.get("viz_status") == "error")
@@ -3551,6 +3572,8 @@ def _summarize(ds_details, wb_details, viz_available):
         "numeric_verification_active": numeric_verification_active,
         "calcs_numeric_verified": calcs_numeric_verified,
         "calcs_numeric_unverified": calcs_numeric_unverified,
+        "data_assets_landed": data_assets_landed,
+        "data_not_landed_reasons": data_not_landed_reasons,
         "needs_review_total": needs_review_total,
         "partitions_stubbed_total": partitions_stubbed_total,
         "columns_pruned_hidden_total": columns_pruned_hidden_total,

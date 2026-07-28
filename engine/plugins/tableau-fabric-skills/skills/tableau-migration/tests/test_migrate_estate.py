@@ -3213,6 +3213,31 @@ def test_summary_reports_no_numeric_verification_on_a_default_run(fixtures_dir, 
     assert summary["calcs_numeric_unverified"] == 0
 
 
+def test_summary_reports_why_no_data_landed():
+    # Landing rows is the PRECONDITION for numeric verification -- the oracle evaluates both sides of
+    # a translation over real data, so an estate that lands nothing can never be verified however
+    # many calcs translate. Reporting the cause turns an inscrutable "nothing was in scope" into an
+    # actionable instruction (install the Hyper reader / re-export with the extract).
+    summary = me._summarize(
+        [{"status": "migrated", "flatfile_data": {"landed": True, "kind": "csv"}},
+         {"status": "migrated", "flatfile_data": {"landed": False,
+                                                  "reason": "hyperapi_unavailable"}}],
+        [{"flatfile_data": {"landed": False, "reason": "hyperapi_unavailable"}},
+         # A live DB source bundles nothing and lands nothing -- that is not a failure, so it must
+         # land in neither bucket rather than inflating the not-landed count.
+         {"viz_status": "built"}],
+        True)
+    assert summary["data_assets_landed"] == 1
+    assert summary["data_not_landed_reasons"] == {"hyperapi_unavailable": 2}
+
+
+def test_summary_reports_no_landing_problem_when_nothing_bundles_data():
+    # A pure live-connection estate must not be described as having failed to land data.
+    summary = me._summarize([{"status": "migrated"}], [{"viz_status": "built"}], True)
+    assert summary["data_assets_landed"] == 0
+    assert summary["data_not_landed_reasons"] == {}
+
+
 # -- second-compiler GUARDS (caller-side wiring: model-aware reference gate + reconciliation oracle) --
 # _second_compile_guards builds a rejection-only guard bundle from a PRIOR build's on-disk TMDL/CSV and
 # the workbook resolver; _second_compile_prepass threads it into land_report. Guards NEVER author or

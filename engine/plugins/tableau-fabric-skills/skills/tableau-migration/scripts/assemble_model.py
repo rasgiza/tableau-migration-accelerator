@@ -4551,7 +4551,8 @@ def migrate_datasource(source, *, model_name, write_to=None, as_pbip=False, data
     # when there is nowhere to land data (no write_to and no flatfile_dest_dir).
     _ff_mat = None
     if (local_data is None and decision.get("mode") is not None
-            and (descriptor.get("flatfile_filename") or decision.get("import_from_extract"))
+            and (descriptor.get("flatfile_filename") or decision.get("import_from_extract")
+                 or decision.get("flatfile_from_extract"))
             and not kwargs.get("flatfile_path")):
         import os as _os
         _ff_dest = flatfile_dest_dir or (
