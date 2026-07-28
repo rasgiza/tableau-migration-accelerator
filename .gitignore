@@ -13,6 +13,10 @@ env/
 
 # Scratch conversion runs (regenerable). The committed `output/` is the
 # README's canonical proof bundle; these variants are local experiments.
+# `out/` is what the README's quick start writes to, so every first-run user
+# generates one -- it must never show up as something git offers to commit.
+out/
+out-*/
 output-hard/
 output-real/
 output-tablecalc/
