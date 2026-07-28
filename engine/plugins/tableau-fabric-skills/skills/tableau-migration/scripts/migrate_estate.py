@@ -2851,8 +2851,10 @@ def _second_compile_prepass(single, wb_id, approved_calc_dax, authored, output_d
     try:
         try:  # scripts/ is on sys.path both as a CLI run and in tests
             from . import second_compiler as _sc
+            from . import reconciliation_oracle as _ro
         except ImportError:
             import second_compiler as _sc
+            import reconciliation_oracle as _ro
         guards = _second_compile_guards(text, output_dir)
         rep = _sc.land_report(text, authored=authored, guards=guards)
     except Exception as exc:
@@ -2865,6 +2867,13 @@ def _second_compile_prepass(single, wb_id, approved_calc_dax, authored, output_d
         merged.update(approved_calc_dax or {})  # explicit human-approved DAX wins on a name clash
     else:
         merged = approved_calc_dax
+    # Per-calc guard telemetry, and the ONLY honest source of a "numerically verified" count.
+    # `second_compiler._oracle_ok` lands a candidate on PASS *and* on INCONCLUSIVE -- it rejects only a
+    # PROVEN divergence -- so len(landed) means "not disproven", NOT "proven". Conflating the two is
+    # exactly the overclaim this project exists to avoid, so split them here and let the summary and
+    # the CLI banner report them as two different things.
+    verdicts = rep.get("guard_verdicts") or {}
+    verified = sorted(nm for nm, v in verdicts.items() if (v or {}).get("oracle") == _ro.PASS)
     detail = {
         "landed": sorted(supplement),
         "count": len(supplement),
@@ -2872,6 +2881,11 @@ def _second_compile_prepass(single, wb_id, approved_calc_dax, authored, output_d
         "detectors": rep.get("detectors", []),
         "cascaded": rep.get("cascaded", []),
         "gate_failures": sorted(rep.get("gate_failures") or {}),
+        "guarded": bool(rep.get("guarded")),
+        "guard_verdicts": verdicts,
+        "numeric_verified": verified,
+        "numeric_verified_count": len(verified),
+        "numeric_unverified_count": len(supplement) - len(verified),
     }
     return merged, detail
 
@@ -3462,6 +3476,20 @@ def _summarize(ds_details, wb_details, viz_available):
         round(100.0 * workbook_calcs_translated / workbook_calcs_total, 1)
         if workbook_calcs_total else None)
 
+    # Numeric-verification rollup. `second_compile` is absent on a default run, so every counter below
+    # stays 0 and the summary is byte-identical -- which is itself the point worth reporting: without
+    # the opt-in pass, NOTHING has been checked against landed data. When the pass IS on, these are the
+    # only counters that separate "the oracle evaluated this against real rows and both sides agreed"
+    # from "we translated it and nothing contradicted us".
+    calcs_numeric_verified = calcs_numeric_unverified = 0
+    numeric_verification_active = False
+    for w in wb_details:
+        sc = w.get("second_compile") or {}
+        if sc.get("guarded"):
+            numeric_verification_active = True
+        calcs_numeric_verified += int(sc.get("numeric_verified_count") or 0)
+        calcs_numeric_unverified += int(sc.get("numeric_unverified_count") or 0)
+
     wb_built = sum(1 for w in wb_details if w.get("viz_status") == "built")
     wb_warned = sum(1 for w in wb_details if w.get("viz_status") == "warned")
     wb_error = sum(1 for w in wb_details if w.get("viz_status") == "error")
@@ -3520,6 +3548,9 @@ def _summarize(ds_details, wb_details, viz_available):
         "workbook_calcs_stubbed": workbook_calcs_stubbed,
         "workbook_calcs_needs_review": workbook_calcs_needs_review,
         "workbook_calcs_coverage_pct": workbook_calcs_coverage_pct,
+        "numeric_verification_active": numeric_verification_active,
+        "calcs_numeric_verified": calcs_numeric_verified,
+        "calcs_numeric_unverified": calcs_numeric_unverified,
         "needs_review_total": needs_review_total,
         "partitions_stubbed_total": partitions_stubbed_total,
         "columns_pruned_hidden_total": columns_pruned_hidden_total,

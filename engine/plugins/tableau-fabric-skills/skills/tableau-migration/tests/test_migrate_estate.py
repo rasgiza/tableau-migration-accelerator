@@ -3177,6 +3177,42 @@ def test_second_compile_prepass_fail_closed_on_unreadable_workbook():
     assert sc["count"] == 0 and "note" in sc
 
 
+def test_second_compile_prepass_splits_numerically_verified_from_merely_landed(monkeypatch):
+    # THE distinction the whole correctness-first claim rests on. `second_compiler._oracle_ok` lands a
+    # candidate on PASS *and* on INCONCLUSIVE -- it rejects only a PROVEN divergence -- so the size of
+    # `landed` means "not disproven", never "proven". Only an oracle verdict of PASS means the formula
+    # and the DAX were both evaluated over real landed rows and agreed.
+    import second_compiler as SC
+
+    def _fake_land_report(twb, *, authored=None, guards=None, **kw):
+        return {"approved": {"Proven": "SUM('O'[S])", "Unproven": "SUM('O'[P])"},
+                "guarded": True,
+                "guard_verdicts": {"Proven": {"reference": "ok", "oracle": "pass"},
+                                   "Unproven": {"reference": "ok", "oracle": "inconclusive"}}}
+
+    monkeypatch.setattr(SC, "land_report", _fake_land_report)
+    src = InMemoryTableauSource(workbooks={"WB": _sc_wb(_SC_STUB_CHAIN)})
+    _merged, sc = me._second_compile_prepass(src, "WB", None, None)
+    assert sc["count"] == 2                        # both landed...
+    assert sc["numeric_verified"] == ["Proven"]    # ...only one is actually proven
+    assert sc["numeric_verified_count"] == 1
+    assert sc["numeric_unverified_count"] == 1
+    assert sc["guarded"] is True
+
+
+def test_summary_reports_no_numeric_verification_on_a_default_run(fixtures_dir, tmp_path):
+    # A default run never reaches the reconciliation oracle (the pre-pass is opt-in), so the summary
+    # must say that out loud. Without this counter a reader sees "measures translated: 2 / 3" and
+    # reasonably concludes the 2 were checked against data. Nothing checked them.
+    out = str(tmp_path / "b")
+    assert me.main(["-i", fixtures_dir, "-o", out]) == 3
+    with open(os.path.join(out, "report.json"), encoding="utf-8") as fh:
+        summary = json.load(fh)["summary"]
+    assert summary["numeric_verification_active"] is False
+    assert summary["calcs_numeric_verified"] == 0
+    assert summary["calcs_numeric_unverified"] == 0
+
+
 # -- second-compiler GUARDS (caller-side wiring: model-aware reference gate + reconciliation oracle) --
 # _second_compile_guards builds a rejection-only guard bundle from a PRIOR build's on-disk TMDL/CSV and
 # the workbook resolver; _second_compile_prepass threads it into land_report. Guards NEVER author or

@@ -30,11 +30,22 @@
     Skip the pre-build discovery pass. Not recommended for real estates — the scan
     flags published datasources that must be fetched before a faithful build.
 
+.PARAMETER Verify
+    After the build, re-run the engine's second-compiler pass over the freshly built
+    bundle with the reconciliation oracle active. The oracle re-parses BOTH the original
+    Tableau formula and the candidate DAX, evaluates both over the data actually landed
+    on disk, and reports which calculations were proven to agree.
+
+    Without this switch nothing in the run is checked against data: a calculation is
+    "translated" because its construct was mappable, not because its value was verified.
+    The oracle only proves the subset it can evaluate, so expect some calcs to come back
+    unverified — that is the honest answer, not a failure.
+
 .EXAMPLE
     .\Convert-TableauToPowerBI.ps1 -Input .\sample\Superstore.twb
 
 .EXAMPLE
-    .\Convert-TableauToPowerBI.ps1 -Input C:\exports\revenue-cycle -Output C:\out\rc
+    .\Convert-TableauToPowerBI.ps1 -Input C:\exports\revenue-cycle -Output C:\out\rc -Verify
 #>
 [CmdletBinding()]
 param(
@@ -48,7 +59,9 @@ param(
 
     [string] $Scratch,
 
-    [switch] $SkipScan
+    [switch] $SkipScan,
+
+    [switch] $Verify
 )
 
 $ErrorActionPreference = 'Stop'
@@ -132,8 +145,9 @@ else {
 }
 
 # --- 1) discovery scan (flags published datasources that must be fetched) ----
+$steps = if ($Verify) { 3 } else { 2 }
 if (-not $SkipScan) {
-    Write-Host "`n[1/2] Scanning for datasource bindings..." -ForegroundColor Cyan
+    Write-Host "`n[1/$steps] Scanning for datasource bindings..." -ForegroundColor Cyan
     Invoke-Py $migrate '-i' $inDir '-o' $outDir '--scan'
     $scanExit = $LASTEXITCODE
     if ($scanExit -ne 0) {
@@ -145,9 +159,20 @@ if (-not $SkipScan) {
 }
 
 # --- 2) build the semantic model + PBIP -------------------------------------
-Write-Host "`n[2/2] Building semantic model + PBIP..." -ForegroundColor Cyan
+Write-Host "`n[2/$steps] Building semantic model + PBIP..." -ForegroundColor Cyan
 Invoke-Py $migrate '-i' $inDir '-o' $outDir '--force'
 $buildExit = $LASTEXITCODE
+
+# --- 2b) opt-in numeric verification ----------------------------------------
+# The reconciliation oracle needs the PRIOR build's landed CSVs and TMDL on disk to evaluate both
+# sides of a translation, so it can only run as a re-run over $outDir -- which is why this is a
+# second invocation rather than a flag on the build above. --second-compile bypasses the stale-output
+# rebuild guard by design, so no --force is needed here.
+if ($Verify) {
+    Write-Host "`n[3/$steps] Verifying translations against landed data..." -ForegroundColor Cyan
+    Invoke-Py $migrate '-i' $inDir '-o' $outDir '--second-compile'
+    $buildExit = $LASTEXITCODE
+}
 
 # --- collect the bundle into -Output ----------------------------------------
 if (Test-Path $Output) { Remove-Item $Output -Recurse -Force }
@@ -186,6 +211,24 @@ if s.get("workbooks_total"):
     # printed just below. This counter means the same thing the definition-of-done gate reports.
     print(f"  Workbook reports bound: {g('workbooks_pbip_built')} / {g('workbooks_total')}")
 print(f"  Visuals rebuilt      : {g('visuals_rebuilt')}")
+# Never let "translated" be read as "checked". Say which one this run actually did.
+if s.get("numeric_verification_active"):
+    ver, unver = s.get("calcs_numeric_verified", 0), s.get("calcs_numeric_unverified", 0)
+    if ver + unver:
+        print(f"  Numerically verified : {ver} of {ver + unver} landed calc(s) proven equal to the"
+              f" Tableau formula over landed data")
+        if unver:
+            print(f"  ...unproven          : {unver}  (outside the oracle's evaluable subset --"
+                  f" translated, not verified)")
+    else:
+        # Verification ran but had nothing to check: the second-compiler landed no new calcs, so
+        # every measure in this model came from the deterministic pass and none was data-checked.
+        # Saying "0 of 0 verified" would imply a check happened and found nothing wrong.
+        print("  Numerically verified : n/a -- verification ran, but no calculation in this model")
+        print("                         was in scope for it (nothing was checked against data).")
+else:
+    print("  Numerically verified : none -- no calculation was evaluated against data.")
+    print("                         Re-run with -Verify to check translations against landed rows.")
 '@
     Invoke-Py '-c' $summaryScript $reportPath
 }
