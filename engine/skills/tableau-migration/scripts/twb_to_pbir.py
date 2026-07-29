@@ -350,6 +350,25 @@ def _rebind_date_axis(field, deriv, date_binding):
 _SPECIAL_FIELDS = {":Measure Names", "Measure Names", "Measure Values",
                    ":Measure Values", "Multiple Values"}
 
+# The Measure NAMES pseudo-field specifically. Power BI has no such field and needs none: dropping
+# several measures into one value well auto-produces the series / legend / column headers that
+# Tableau spells out with this pill. So when Measure Names rides a shelf next to real measures, the
+# rebuilt visual already reproduces it -- the pill is redundant, not unbindable. Reporting that as
+# "no model binding (skipped)" degraded 34 visuals across the 13-workbook estate that were in fact
+# rebuilt correctly, which is the expensive kind of wrong: it buries the visuals that genuinely did
+# lose something under ones that did not. Measure VALUES is excluded here on purpose -- it names the
+# member set, and losing it really does change what the visual shows.
+_MEASURE_NAMES_TOKENS = {":Measure Names", "Measure Names"}
+
+
+def _is_measure_names_token(field_id):
+    """True for the Measure Names pseudo-field in any of its shelf spellings."""
+    fid = (field_id or "").strip()
+    if fid in _MEASURE_NAMES_TOKENS:
+        return True
+    # shelf pills arrive fully qualified, e.g. ``[federated.abc].[:Measure Names]``
+    return fid.endswith(":Measure Names]")
+
 # -- Implicit row-count recognition --------------------------------------------
 # Tableau expresses "count the rows of a table" two ways, neither of which names a real model
 # column: (1) an aggregation over the object-model row identity ``__tableau_internal_object_id__``
@@ -881,9 +900,14 @@ def _resolve_field(ds, field_id, base_cols, instances, index, ds_caption,
     cannot stand behind. ``warn_special`` is set ``False`` by the Measure Values/Names path,
     which handles the ``Multiple Values`` / ``:Measure Names`` pseudo-fields itself, so dropping
     them here must stay silent rather than emit a false "no model binding" warning.
+
+    The Measure NAMES pill is always dropped silently, ``warn_special`` or not: Power BI produces
+    that legend implicitly from the measures in the value well, so its absence from the output is
+    the correct translation rather than a lost binding. The caller records one accurate deferral
+    per worksheet instead -- see :func:`_measure_names_deferral`.
     """
     if not field_id or field_id in _SPECIAL_FIELDS or field_id.startswith(":"):
-        if warn_special:
+        if warn_special and not _is_measure_names_token(field_id):
             warnings.append(_warn("worksheet", worksheet,
                                   f"field '{field_id}' has no model binding (skipped)"))
         return None
@@ -1595,6 +1619,35 @@ def _uses_measure_values(rows_text, cols_text, pane):
     if holder is not None:
         blob += " " + " ".join((c.get("column") or "") for c in list(holder))
     return any(tok in blob for tok in _MV_VALUE_TOKENS)
+
+
+def _has_measure_names_pill(rows_text, cols_text, pane):
+    """True when the worksheet carries the Measure Names pill on a shelf or a marks-card encoding."""
+    blob = (rows_text or "") + " " + (cols_text or "")
+    holder = _first(pane, "encodings") if pane is not None else None
+    if holder is not None:
+        blob += " " + " ".join((c.get("column") or "") for c in list(holder))
+    return ":Measure Names]" in blob
+
+
+def _measure_names_deferral(worksheet, measure_count):
+    """One accurate note for a Measure Names pill that Power BI reproduces implicitly.
+
+    Returns a structured warning, or ``None`` when the pill is genuinely redundant and the visual
+    needs no caveat at all. Two different situations wear the same pill:
+
+    - **two or more measures resolved** -- Power BI's value well already renders exactly the series
+      and headers the pill was spelling out. Nothing is lost, so nothing is reported.
+    - **fewer than two measures resolved** -- the pill was labelling a set the rebuild could not
+      reconstruct, so the header or legend it drove is missing. That is a real deferral and is
+      still reported, because staying silent here is how a genuinely broken visual would pass as
+      clean.
+    """
+    if (measure_count or 0) >= 2:
+        return None
+    return _warn("worksheet", worksheet,
+                 "Measure Names labelled a set that resolved to "
+                 f"{measure_count or 0} measure(s); its header/legend is not reproduced")
 
 
 def _mv_shelf_locations(rows_text, cols_text, pane):
@@ -2795,6 +2848,18 @@ def _parse_worksheet(ws, index, ds_caption, warnings, internal_fields=None, date
     dims_cols = [f for f in cols if f["kind"] == "category"]
     meas_rows = [f for f in rows if f["kind"] == "value"]
     meas_cols = [f for f in cols if f["kind"] == "value"]
+
+    # A Measure Names pill WITHOUT the Measure Values placeholder means the author listed the
+    # measures individually and used the pill only to head/legend them. Power BI does that on its
+    # own from the value well, so this is reported only when too few measures survived for the
+    # rebuild to reproduce the label. The Measure Values path below owns its own reporting.
+    if not uses_mv and _has_measure_names_pill(rows_text, cols_text, pane):
+        _enc_meas_n = len([f for f in (encodings.get("size"), encodings.get("label"),
+                                       encodings.get("angle"), encodings.get("color"))
+                           if f and f.get("kind") == "value"])
+        _mn_note = _measure_names_deferral(name, len(meas_rows) + len(meas_cols) + _enc_meas_n)
+        if _mn_note is not None:
+            warnings.append(_mn_note)
 
     fidelity_note = None
     combo_split = None

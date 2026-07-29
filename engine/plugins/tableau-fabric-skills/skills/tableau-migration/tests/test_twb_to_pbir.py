@@ -5968,3 +5968,63 @@ def test_image_objects_never_regress_when_resources_none():
     pkgs = report.get("resourcePackages", [])
     image_items = [it for pkg in pkgs for it in pkg.get("items", []) if it.get("type") == "Image"]
     assert image_items == []
+
+
+# -- Measure Names WITHOUT the Measure Values placeholder ----------------------
+# The author listed measures individually and used the pill only to head/legend them. Power BI
+# builds that legend from the value well on its own, so the pill's absence is the correct
+# translation -- not a lost binding. Reporting it as one degraded 34 correctly-rebuilt visuals
+# across the customer estate, which buried the visuals that genuinely did lose something.
+
+
+def test_measure_names_beside_real_measures_is_not_reported_as_unbound():
+    ws = _worksheet("Two Measures", "Bar",
+                    rows="[federated.abc].[sum:Sales:qk] [federated.abc].[sum:Profit:qk]",
+                    cols="[federated.abc].[none:Category:nk] [federated.abc].[:Measure Names]",
+                    deps_extra=_INST)
+    ir = parse_twb(_workbook(ws))
+    blob = json.dumps(ir["warnings"])
+    assert "no model binding" not in blob
+    assert "Measure Names" not in blob
+
+
+def test_measure_names_with_too_few_measures_still_reports_the_lost_label():
+    # Only one measure survived, so the header/legend the pill drove is genuinely missing.
+    # Staying silent here is how a broken visual would pass as clean.
+    ws = _worksheet("One Measure", "Bar",
+                    rows="[federated.abc].[sum:Sales:qk]",
+                    cols="[federated.abc].[none:Category:nk] [federated.abc].[:Measure Names]",
+                    deps_extra=_INST)
+    ir = parse_twb(_workbook(ws))
+    blob = json.dumps(ir["warnings"])
+    assert "Measure Names" in blob and "not reproduced" in blob
+
+
+def test_other_special_pseudo_fields_are_still_reported_as_unbound():
+    # The silence is scoped to Measure Names alone; a genuinely unbindable pseudo-field must
+    # keep warning, or this change would have traded a false positive for a false negative.
+    ws = _worksheet("Other Special", "Bar",
+                    rows="[federated.abc].[sum:Sales:qk]",
+                    cols="[federated.abc].[:Some Other Internal]",
+                    deps_extra=_INST)
+    ir = parse_twb(_workbook(ws))
+    assert "no model binding" in json.dumps(ir["warnings"])
+
+
+def test_measure_names_token_recognised_in_every_shelf_spelling():
+    from twb_to_pbir import _is_measure_names_token
+    for spelling in (":Measure Names", "Measure Names",
+                     "[federated.abc].[:Measure Names]", "[:Measure Names]"):
+        assert _is_measure_names_token(spelling), spelling
+    for other in ("", None, "Measure Values", ":Measure Values",
+                  "[federated.abc].[sum:Sales:qk]", "Multiple Values"):
+        assert not _is_measure_names_token(other), other
+
+
+def test_measure_names_deferral_is_silent_only_when_the_value_well_reproduces_it():
+    from twb_to_pbir import _measure_names_deferral
+    assert _measure_names_deferral("W", 2) is None
+    assert _measure_names_deferral("W", 5) is None
+    for too_few in (0, 1, None):
+        note = _measure_names_deferral("W", too_few)
+        assert note is not None and "not reproduced" in json.dumps(note)
