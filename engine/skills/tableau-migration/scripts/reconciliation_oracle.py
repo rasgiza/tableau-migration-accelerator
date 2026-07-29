@@ -17,11 +17,26 @@ worst possible outcome, strictly worse than leaving a stub. So the oracle:
     unresolved reference, multi-table) is ``inconclusive`` -- which, under faithful-or-stub, keeps
     the stub.
 
-Supported subset (v1): a measure that is an arithmetic combination (``+ - * /`` / ``DIVIDE``) of
+Supported subset: a measure that is an arithmetic combination (``+ - * /`` / ``DIVIDE``) of
 single-column aggregations (``SUM/AVG/MIN/MAX/COUNT/COUNTD/MEDIAN`` and the ``*X`` row-iterator
 forms) over ONE table, with ``ZN`` / ``IFNULL`` / ``COALESCE`` null handling and numeric literals.
 The argmax/argmin-over-dimension idiom is handled separately by :func:`reconcile_argmax`. Everything
 else -> ``inconclusive``.
+
+Conditionals are in-subset too, because a census of a real 13-workbook estate found ``IF`` / ``CASE``
+/ ``IIF`` in 38% of all calculated fields -- by a wide margin the single biggest reason a translation
+went unproven. So the grammar also accepts Tableau ``IF/ELSEIF/ELSE/END``, ``IIF``, ``CASE/WHEN``,
+the comparison operators, ``AND`` / ``OR`` / ``NOT``, and string/boolean literals, against DAX
+``IF`` / ``SWITCH`` / ``BLANK`` / ``&&`` / ``||``. Both front-ends desugar onto ONE :class:`If` node,
+so ``CASE x WHEN 1 THEN ...`` and ``SWITCH(x, 1, ...)`` -- or Tableau ``IF`` against DAX
+``SWITCH(TRUE(), ...)`` -- produce identical ASTs and cannot disagree for spelling reasons alone.
+
+Comparison is deliberately three-valued: when two operands cannot be put on a common type (say a
+text column against a number) the comparison is *unknown*, not false, and an unknown condition takes
+the ELSE branch on both sides. Unknown propagates to a null result, and :func:`reconcile` skips a
+grain that is null on either side -- so an under-modelled comparison degrades to ``inconclusive``
+rather than manufacturing agreement. That is the same faithful-or-stub bias as the rest of the file:
+the cost of an unknown is a stub, the cost of a false PASS is wrong numbers in front of a customer.
 
 Pure standard library (``csv`` + ``statistics``) so it runs everywhere and is fully unit-testable
 offline; it never imports pandas/duckdb and never touches Tableau or Fabric.
@@ -53,6 +68,9 @@ _TABLEAU_AGG = {
     "SUM": "SUM", "AVG": "AVG", "AVERAGE": "AVG", "MIN": "MIN", "MAX": "MAX",
     "COUNT": "COUNT", "COUNTD": "COUNTD", "MEDIAN": "MEDIAN",
 }
+
+# Comparison spellings -> canonical. Tableau writes ``=``/``<>``, DAX also accepts ``==``/``!=``.
+_CMP_OPS = {"=": "=", "==": "=", "<>": "<>", "!=": "<>", ">": ">", "<": "<", ">=": ">=", "<=": "<="}
 
 
 class _Unsupported(Exception):
@@ -104,15 +122,71 @@ class Coalesce:
         self.args = args
 
 
+class Str:
+    """A string literal -- only ever meaningful as a comparison operand or a branch result."""
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = str(value)
+
+
+class Bool:
+    """``TRUE`` / ``FALSE`` (Tableau) and ``TRUE()`` / ``FALSE()`` (DAX)."""
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = bool(value)
+
+
+class Null:
+    """DAX ``BLANK()`` -- an explicit null, so ``IF(c, x)`` and ``IF(c, x, BLANK())`` agree."""
+    __slots__ = ()
+
+
+class Cmp:
+    """A comparison. Evaluates to True/False, or None when the operands are not comparable."""
+    __slots__ = ("op", "left", "right")
+
+    def __init__(self, op, left, right):
+        self.op = op
+        self.left = left
+        self.right = right
+
+
+class Logic:
+    """``AND`` / ``OR`` / ``NOT`` under three-valued logic (None means unknown)."""
+    __slots__ = ("op", "args")
+
+    def __init__(self, op, args):
+        self.op = op
+        self.args = list(args)
+
+
+class If:
+    """The single conditional node both front-ends desugar onto.
+
+    ``branches`` is an ordered list of ``(condition, value)``; ``alt`` is the ELSE value or None.
+    Tableau ``IF``/``ELSEIF``, ``IIF`` and ``CASE``/``WHEN``, and DAX ``IF`` and ``SWITCH`` (both the
+    value form and the ``SWITCH(TRUE(), ...)`` idiom) all land here, so an equivalent pair cannot
+    diverge merely because the two dialects spell the same branch differently.
+    """
+    __slots__ = ("branches", "alt")
+
+    def __init__(self, branches, alt=None):
+        self.branches = list(branches)
+        self.alt = alt
+
+
 # --------------------------------------------------------------------------- tokenizer
 _TOKEN_RE = re.compile(
     r"""
       (?P<ws>\s+)
     | (?P<number>\d+\.\d+|\.\d+|\d+)
-    | (?P<quoted>'(?:[^']|'')*')          # 'Table Name'  (DAX single-quoted table)
+    | (?P<dquoted>"(?:[^"]|"")*")         # "text" -- a string literal in both dialects
+    | (?P<quoted>'(?:[^']|'')*')          # 'Table Name' (DAX) / 'text' (Tableau) -- front-end decides
     | (?P<bracket>\[(?:[^\]]|\]\])*\])    # [Column]/[Field]/[Measure]
-    | (?P<name>[A-Za-z_][A-Za-z0-9_.]*)   # function name or bare table name
-    | (?P<op>[()+\-*/,])
+    | (?P<name>[A-Za-z_][A-Za-z0-9_.]*)   # function name, keyword, or bare table name
+    | (?P<op><=|>=|<>|!=|==|&&|\|\||[()+\-*/,<>=])
     """,
     re.VERBOSE,
 )
@@ -133,6 +207,8 @@ def _tokenize(text):
         val = m.group()
         if kind == "quoted":
             val = val[1:-1].replace("''", "'")
+        elif kind == "dquoted":
+            val = val[1:-1].replace('""', '"')
         elif kind == "bracket":
             val = val[1:-1].replace("]]", "]")
         tokens.append((kind, val))
@@ -165,13 +241,67 @@ class _Parser:
         if kind != "op" or val != op:
             raise _Unsupported("expected %r" % op)
 
+    def _expect_word(self, word):
+        kind, val = self._next()
+        if kind != "name" or val.upper() != word:
+            raise _Unsupported("expected %s" % word)
+
+    def _peek_word(self):
+        """The upper-cased keyword at the cursor, or None -- lets a clause spot its terminator."""
+        kind, val = self._peek()
+        return val.upper() if kind == "name" else None
+
     def parse(self):
         node = self._expr()
         if self.i != len(self.toks):
             raise _Unsupported("trailing tokens")
         return node
 
+    # Precedence, loosest first: OR < AND < NOT < comparison < +- < */ < factor. This matches both
+    # Tableau and DAX, so the same source text binds the same way through either front-end.
     def _expr(self):
+        return self._or_expr()
+
+    def _take_logic(self, word):
+        """Consume ``AND``/``OR`` in either spelling (word form, or DAX ``&&``/``||``)."""
+        kind, val = self._peek()
+        if kind == "name" and val.upper() == word:
+            self._next()
+            return True
+        if kind == "op" and val == ("&&" if word == "AND" else "||"):
+            self._next()
+            return True
+        return False
+
+    def _or_expr(self):
+        node = self._and_expr()
+        while self._take_logic("OR"):
+            node = Logic("OR", [node, self._and_expr()])
+        return node
+
+    def _and_expr(self):
+        node = self._not_expr()
+        while self._take_logic("AND"):
+            node = Logic("AND", [node, self._not_expr()])
+        return node
+
+    def _not_expr(self):
+        if self._peek_word() == "NOT":
+            self._next()
+            return Logic("NOT", [self._not_expr()])
+        return self._cmp_expr()
+
+    def _cmp_expr(self):
+        node = self._add_expr()
+        kind, val = self._peek()
+        if kind == "op" and val in _CMP_OPS:
+            self._next()
+            # Non-associative on purpose: ``a < b < c`` is a modelling mistake in both dialects, and
+            # chaining it would silently compare a boolean against a number.
+            return Cmp(_CMP_OPS[val], node, self._add_expr())
+        return node
+
+    def _add_expr(self):
         node = self._term()
         while True:
             kind, val = self._peek()
@@ -207,6 +337,19 @@ class _Parser:
         if kind == "number":
             self._next()
             return Num(val)
+        if kind == "dquoted":
+            self._next()
+            return Str(val)
+        if kind == "name" and val.upper() in ("TRUE", "FALSE"):
+            # Bare ``TRUE``/``FALSE`` (Tableau) and the call form ``TRUE()``/``FALSE()`` (DAX) are
+            # the same literal; accepting both here is what lets ``CASE [x] WHEN TRUE ...`` line up
+            # with ``SWITCH(TRUE(), ...)``.
+            self._next()
+            nkind, nval = self._peek()
+            if nkind == "op" and nval == "(":
+                self._next()
+                self._expect_op(")")
+            return Bool(val.upper() == "TRUE")
         if kind == "name":
             return self._name_lead()
         if kind in ("bracket", "quoted"):
@@ -240,15 +383,15 @@ class _Parser:
 
 
 def _row_expr_ok(node):
-    """A validated row-level expression: Col/Num/Bin/Coalesce, NO aggregation inside."""
+    """A validated row-level expression -- anything but an aggregation nested inside one.
+
+    Walks via :func:`_children` rather than re-listing the node types, so a node added to the AST
+    later cannot slip past this check by being forgotten here.
+    """
     if isinstance(node, Agg):
         raise _Unsupported("aggregation nested inside an aggregation")
-    if isinstance(node, Bin):
-        _row_expr_ok(node.left)
-        _row_expr_ok(node.right)
-    elif isinstance(node, Coalesce):
-        for a in node.args:
-            _row_expr_ok(a)
+    for child in _children(node):
+        _row_expr_ok(child)
     return node
 
 
@@ -308,7 +451,50 @@ class _DaxParser(_Parser):
             if not args:
                 raise _Unsupported("COALESCE expects args")
             return Coalesce(args)
+        if fn == "IF":
+            args = self._args()
+            if len(args) not in (2, 3):
+                raise _Unsupported("IF expects 2 or 3 args")
+            return If([(args[0], args[1])], args[2] if len(args) == 3 else None)
+        if fn == "SWITCH":
+            return self._switch()
+        if fn == "BLANK":
+            self._expect_op("(")
+            self._expect_op(")")
+            return Null()
+        if fn == "NOT":
+            args = self._args()
+            if len(args) != 1:
+                raise _Unsupported("NOT expects one arg")
+            return Logic("NOT", args)
+        if fn in ("AND", "OR"):
+            args = self._args()
+            if len(args) != 2:
+                raise _Unsupported("%s expects two args" % fn)
+            return Logic(fn, args)
         raise _Unsupported("unsupported DAX function %r" % fn)
+
+    def _switch(self):
+        """``SWITCH(expr, v1, r1, ..., [default])`` -> the shared :class:`If`.
+
+        The ``SWITCH(TRUE(), cond1, r1, ...)`` idiom is recognised and desugared to bare conditions
+        rather than ``TRUE() = cond1``. Both forms are legal DAX and the translator emits either
+        depending on the shape of the source calc, so collapsing them here is what stops an
+        ``IF``-vs-``SWITCH`` spelling difference from reading as a numeric disagreement.
+        """
+        args = self._args()
+        if len(args) < 3:
+            raise _Unsupported("SWITCH expects at least 3 args")
+        subject, rest = args[0], list(args[1:])
+        alt = rest.pop() if len(rest) % 2 else None
+        switch_true = isinstance(subject, Bool) and subject.value
+        branches = []
+        for i in range(0, len(rest) - 1, 2):
+            test, result = rest[i], rest[i + 1]
+            branches.append((test if switch_true else Cmp("=", subject, test), result))
+        if not branches:
+            raise _Unsupported("SWITCH with no branches")
+        return If(branches, alt)
 
     def _args_tableref(self):
         """COUNTROWS('Table') / COUNTROWS(Table) -> the referenced table name."""
@@ -348,12 +534,77 @@ class _TableauParser(_Parser):
         return Col(hit[0], hit[1])
 
     def _name_lead(self):
+        word = self._peek_word()
+        if word == "IF":
+            self._next()
+            return self._parse_if()
+        if word == "CASE":
+            self._next()
+            return self._parse_case()
         kind, val = self._next()
         upper = val.upper()
         nxt_kind, nxt_val = self._peek()
         if nxt_kind == "op" and nxt_val == "(":
             return self._func(upper)
         raise _Unsupported("bare name %r" % val)
+
+    def _parse_if(self):
+        """``IF c THEN v [ELSEIF c THEN v]* [ELSE v] END`` -- the ``IF`` token is already consumed.
+
+        A nested ``ELSE IF ... END END`` needs no special case: the ELSE value is parsed as a full
+        expression, and ``IF`` is a valid expression lead.
+        """
+        branches = []
+        cond = self._expr()
+        self._expect_word("THEN")
+        branches.append((cond, self._expr()))
+        while True:
+            word = self._peek_word()
+            if word == "ELSEIF":
+                self._next()
+                cond = self._expr()
+                self._expect_word("THEN")
+                branches.append((cond, self._expr()))
+            elif word == "ELSE":
+                self._next()
+                alt = self._expr()
+                self._expect_word("END")
+                return If(branches, alt)
+            elif word == "END":
+                self._next()
+                return If(branches, None)
+            else:
+                raise _Unsupported("malformed IF (expected ELSEIF/ELSE/END)")
+
+    def _parse_case(self):
+        """``CASE subject WHEN v THEN r [...] [ELSE d] END`` -> ``If`` over ``subject = v`` tests.
+
+        Desugaring to the same node DAX ``SWITCH`` produces is the whole point: the translator is
+        free to emit either shape and the oracle still sees one AST on both sides.
+        """
+        subject = self._expr()
+        branches = []
+        alt = None
+        while True:
+            word = self._peek_word()
+            if word == "WHEN":
+                self._next()
+                test = self._expr()
+                self._expect_word("THEN")
+                branches.append((Cmp("=", subject, test), self._expr()))
+            elif word == "ELSE":
+                self._next()
+                alt = self._expr()
+                self._expect_word("END")
+                break
+            elif word == "END":
+                self._next()
+                break
+            else:
+                raise _Unsupported("malformed CASE (expected WHEN/ELSE/END)")
+        if not branches:
+            raise _Unsupported("CASE with no WHEN branch")
+        return If(branches, alt)
 
     def _func(self, fn):
         if fn in _TABLEAU_AGG:
@@ -371,6 +622,14 @@ class _TableauParser(_Parser):
             if len(args) != 2:
                 raise _Unsupported("IFNULL expects two args")
             return Coalesce(args)
+        if fn == "IIF":
+            # The 4-argument form takes a separate value for an UNKNOWN condition, which the shared
+            # If node has no way to represent -- so it stays out of subset rather than being
+            # approximated by the 3-argument semantics.
+            args = self._args()
+            if len(args) != 3:
+                raise _Unsupported("IIF expects three args")
+            return If([(args[0], args[1])], args[2])
         raise _Unsupported("unsupported Tableau function %r" % fn)
 
     def _factor(self):
@@ -378,6 +637,10 @@ class _TableauParser(_Parser):
         if kind == "bracket":
             self._next()
             return self._resolve(val)
+        if kind == "quoted":
+            # Tableau single-quotes are string literals; only the DAX front-end reads them as tables.
+            self._next()
+            return Str(val)
         return super()._factor()
 
 
@@ -400,32 +663,142 @@ def _to_number(value):
         return None
 
 
-def _eval_row(node, row):
-    """Evaluate a row-level expression against a single row dict -> float or None."""
+def _to_bool(value):
+    """Coerce a raw value to True/False, or None when it is not a recognisable boolean."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return None if (isinstance(value, float) and math.isnan(value)) else value != 0
+    s = str(value).strip().lower()
+    if s in ("true", "t", "yes", "1"):
+        return True
+    if s in ("false", "f", "no", "0"):
+        return False
+    return None
+
+
+def _truthy(value):
+    """Branch selection. An unknown condition is NOT taken -- it falls through to ELSE.
+
+    Tableau (``IF NULL THEN a ELSE b END``) and DAX (``IF(BLANK(), a, b)``) agree on that, so the
+    shared evaluator does too.
+    """
+    return _to_bool(value) is True
+
+
+def _comparable(a, b):
+    """Put two raw values on one comparable type, or return None meaning 'cannot be compared'.
+
+    Boolean-ness wins first (so a landed ``"True"`` cell lines up with a literal ``TRUE``), then a
+    numeric reading of both sides, then a case-insensitive text comparison -- which matches both
+    Tableau's and DAX's default text collation. A number against non-numeric text is *unknown*
+    rather than false: guessing an ordering there is exactly how a checker invents agreement.
+    """
+    if isinstance(a, bool) or isinstance(b, bool):
+        x, y = _to_bool(a), _to_bool(b)
+        return None if x is None or y is None else (x, y)
+    na, nb = _to_number(a), _to_number(b)
+    if na is not None and nb is not None:
+        return (na, nb)
+    if isinstance(a, str) and isinstance(b, str):
+        return (a.strip().casefold(), b.strip().casefold())
+    return None
+
+
+def _compare(op, a, b):
+    if a is None or b is None:
+        return None
+    pair = _comparable(a, b)
+    if pair is None:
+        return None
+    x, y = pair
+    if op == "=":
+        return x == y
+    if op == "<>":
+        return x != y
+    if op == ">":
+        return x > y
+    if op == "<":
+        return x < y
+    if op == ">=":
+        return x >= y
+    if op == "<=":
+        return x <= y
+    raise _Unsupported("comparison %r" % op)
+
+
+def _logic(op, values):
+    """Three-valued AND/OR/NOT: unknown only survives when it can still change the answer."""
+    vals = [_to_bool(v) for v in values]
+    if op == "NOT":
+        v = vals[0] if vals else None
+        return None if v is None else (not v)
+    if op == "AND":
+        if any(v is False for v in vals):
+            return False
+        return None if any(v is None for v in vals) else True
+    if op == "OR":
+        if any(v is True for v in vals):
+            return True
+        return None if any(v is None for v in vals) else False
+    raise _Unsupported("logical operator %r" % op)
+
+
+def _eval_row_raw(node, row):
+    """Evaluate a row-level expression to its RAW value (float, str, bool or None).
+
+    Comparisons need the uncoerced cell -- ``[Category] = "Furniture"`` is meaningless once the
+    cell has been forced through :func:`_to_number`. :func:`_eval_row` is this function plus that
+    coercion, so the arithmetic path is unchanged.
+    """
     if isinstance(node, Num):
         return node.value
+    if isinstance(node, Str):
+        return node.value
+    if isinstance(node, Bool):
+        return node.value
+    if isinstance(node, Null):
+        return None
     if isinstance(node, Col):
-        return _to_number(row.get(node.column))
+        v = row.get(node.column)
+        if isinstance(v, str):
+            v = v.strip()
+            return v or None
+        return v
     if isinstance(node, Coalesce):
         for a in node.args:
-            v = _eval_row(a, row)
+            v = _eval_row_raw(a, row)
             if v is not None:
                 return v
         return None
+    if isinstance(node, Cmp):
+        return _compare(node.op, _eval_row_raw(node.left, row), _eval_row_raw(node.right, row))
+    if isinstance(node, Logic):
+        return _logic(node.op, [_eval_row_raw(a, row) for a in node.args])
+    if isinstance(node, If):
+        for cond, value in node.branches:
+            if _truthy(_eval_row_raw(cond, row)):
+                return _eval_row_raw(value, row)
+        return _eval_row_raw(node.alt, row) if node.alt is not None else None
     if isinstance(node, Bin):
         return _combine(node, _eval_row(node.left, row), _eval_row(node.right, row))
     raise _Unsupported("non row-level node in row context")
 
 
+def _eval_row(node, row):
+    """Evaluate a row-level expression against a single row dict -> float or None."""
+    return _to_number(_eval_row_raw(node, row))
+
+
 def _raw_cell(node, row):
     """Raw (uncoerced) cell for COUNT/COUNTD, which count non-blank values incl. text."""
-    if isinstance(node, Col):
-        v = row.get(node.column)
-        if v is None:
-            return None
-        s = v if not isinstance(v, str) else v.strip()
-        return None if s == "" else s
-    return _eval_row(node, row)
+    v = _eval_row_raw(node, row)
+    if isinstance(v, str):
+        v = v.strip()
+        return v or None
+    return v
 
 
 def _combine(node, a, b):
@@ -473,9 +846,15 @@ def _aggregate(node, rows):
 
 
 def _eval_scalar(node, rows):
-    """Evaluate a scalar measure AST over a set of rows -> float or None."""
+    """Evaluate a scalar measure AST over a set of rows -> float, str, bool or None."""
     if isinstance(node, Num):
         return node.value
+    if isinstance(node, Str):
+        return node.value
+    if isinstance(node, Bool):
+        return node.value
+    if isinstance(node, Null):
+        return None
     if isinstance(node, Agg):
         return _aggregate(node, rows)
     if isinstance(node, Coalesce):
@@ -484,11 +863,26 @@ def _eval_scalar(node, rows):
             if v is not None:
                 return v
         return None
+    if isinstance(node, Cmp):
+        return _compare(node.op, _eval_scalar(node.left, rows), _eval_scalar(node.right, rows))
+    if isinstance(node, Logic):
+        return _logic(node.op, [_eval_scalar(a, rows) for a in node.args])
+    if isinstance(node, If):
+        for cond, value in node.branches:
+            if _truthy(_eval_scalar(cond, rows)):
+                return _eval_scalar(value, rows)
+        return _eval_scalar(node.alt, rows) if node.alt is not None else None
     if isinstance(node, Bin):
-        return _combine(node, _eval_scalar(node.left, rows), _eval_scalar(node.right, rows))
+        return _combine(node, _scalar_num(node.left, rows), _scalar_num(node.right, rows))
     if isinstance(node, Col):
         raise _Unsupported("bare column is not a measure")
     raise _Unsupported("unsupported node")
+
+
+def _scalar_num(node, rows):
+    """Scalar arithmetic operand, coerced to a number -- a branch may have returned text."""
+    v = _eval_scalar(node, rows)
+    return _to_number(v) if isinstance(v, (str, bool)) else v
 
 
 # --------------------------------------------------------------------------- table / verdict utils
@@ -505,38 +899,46 @@ def _normalize_tables(tables):
     return out
 
 
+def _children(node):
+    """Every sub-node of ``node``.
+
+    One place, deliberately: :func:`_tables_of`, :func:`_columns_of` and :func:`_row_expr_ok` all
+    walk through here. If a new node type were added to the AST and forgotten in a bespoke walker,
+    :func:`_single_table_of` could miss a second table and the oracle would then evaluate a
+    two-table expression against one table's rows -- a manufactured disagreement, the one failure
+    mode this module exists to avoid.
+    """
+    if isinstance(node, (Bin, Cmp)):
+        return [node.left, node.right]
+    if isinstance(node, (Coalesce, Logic)):
+        return list(node.args)
+    if isinstance(node, If):
+        out = []
+        for cond, value in node.branches:
+            out.append(cond)
+            out.append(value)
+        if node.alt is not None:
+            out.append(node.alt)
+        return out
+    if isinstance(node, Agg):
+        return [node.arg] if node.arg is not None else []
+    return []
+
+
 def _tables_of(node, acc):
-    if isinstance(node, Col):
-        if node.table:
-            acc.add(node.table)
-    elif isinstance(node, Agg):
-        if node.table:
-            acc.add(node.table)
-        if node.arg is not None:
-            _tables_of(node.arg, acc)
-    elif isinstance(node, Bin):
-        _tables_of(node.left, acc)
-        _tables_of(node.right, acc)
-    elif isinstance(node, Coalesce):
-        for a in node.args:
-            _tables_of(a, acc)
+    if getattr(node, "table", None):
+        acc.add(node.table)
+    for child in _children(node):
+        _tables_of(child, acc)
     return acc
 
 
 def _columns_of(node, acc):
     """Column names referenced (as measure inputs) by an AST -- excluded from auto-grain dims."""
-    if isinstance(node, Col):
-        if node.column:
-            acc.add(node.column)
-    elif isinstance(node, Agg):
-        if node.arg is not None:
-            _columns_of(node.arg, acc)
-    elif isinstance(node, Bin):
-        _columns_of(node.left, acc)
-        _columns_of(node.right, acc)
-    elif isinstance(node, Coalesce):
-        for a in node.args:
-            _columns_of(a, acc)
+    if isinstance(node, Col) and node.column:
+        acc.add(node.column)
+    for child in _children(node):
+        _columns_of(child, acc)
     return acc
 
 
@@ -656,7 +1058,16 @@ def reconcile(tableau_formula, candidate_dax, tables, *, resolver=None, grain=No
 
     d_tbl = _single_table_of(d_ast)
     if t_tbl is None or d_tbl is None:
-        return _verdict(INCONCLUSIVE, "measure references zero or multiple tables (v1 is single-table)")
+        # Zero and multiple are very different problems -- an expression over no column at all is
+        # unreconcilable in principle, whereas a genuinely cross-table one is a coverage gap worth
+        # closing. Reporting them under one label hides which of the two an estate actually has.
+        n_t, n_d = len(_tables_of(t_ast, set())), len(_tables_of(d_ast, set()))
+        if not n_t and not n_d:
+            return _verdict(INCONCLUSIVE, "measure references no table at all (nothing to evaluate over)")
+        return _verdict(
+            INCONCLUSIVE,
+            "measure references multiple tables (tableau=%d, candidate=%d; the oracle is single-table)"
+            % (n_t, n_d))
     if t_tbl != d_tbl:
         return _verdict(
             INCONCLUSIVE,
@@ -760,6 +1171,12 @@ _EVAL_ERROR = object()
 
 def _safe_scalar(node, rows):
     try:
-        return _eval_scalar(node, rows)
+        value = _eval_scalar(node, rows)
     except _Unsupported:
         return _EVAL_ERROR
+    # A conditional can hand back text or a boolean. Numeric reconciliation has nothing to say about
+    # a string measure, so coerce: a boolean becomes 1/0, non-numeric text becomes None, and
+    # reconcile() skips a grain that is None on either side rather than comparing incomparables.
+    if isinstance(value, (str, bool)):
+        return _to_number(value)
+    return value

@@ -139,10 +139,20 @@ def test_explicit_grain_catches_group_divergence():
 
 # -- INCONCLUSIVE: out of subset / no data -------------------------------------------------------
 def test_out_of_subset_tableau_is_inconclusive():
-    v = reconcile("IF SUM([Sales]) > 0 THEN 1 ELSE 0 END", "SUM('Orders'[Sales])",
+    v = reconcile("DATEDIFF('day', [Order Date], [Ship Date])", "SUM('Orders'[Sales])",
                   _orders(), resolver=_resolver)
     assert v["status"] == INCONCLUSIVE, v
     assert "tableau" in v["reason"].lower()
+
+
+def test_a_conditional_that_used_to_be_out_of_subset_is_now_decided():
+    # This exact pair was the out-of-subset fixture until conditionals joined the grammar. It is not
+    # merely parseable now -- the two sides really do disagree (1 vs the sum), and saying so is the
+    # entire point of widening the subset.
+    v = reconcile("IF SUM([Sales]) > 0 THEN 1 ELSE 0 END", "SUM('Orders'[Sales])",
+                  _orders(), resolver=_resolver)
+    assert v["status"] == FAIL, v
+    assert v["tableau_value"] == 1.0, v
 
 
 def test_out_of_subset_candidate_is_inconclusive():
@@ -311,3 +321,134 @@ def test_load_tables_from_csv_tolerates_ragged_and_empty(tmp_path):
     assert tables["R"]["rows"][1]["A"] == "3"           # long row's overflow ignored
     assert tables["E"] == {"columns": [], "rows": []}   # empty file -> empty table
 
+
+
+# -- conditionals: IF / CASE / IIF vs DAX IF / SWITCH ---------------------------------------------
+# A census of a real 13-workbook estate put IF/CASE/IIF in 38% of all calculated fields -- the
+# single biggest reason a translation went unproven. These tests pin the contract for that grammar:
+# equivalent spellings across the two dialects must agree, a wrong branch must be CAUGHT, and
+# anything the evaluator cannot decide must stay INCONCLUSIVE rather than drift into a false PASS.
+def test_tableau_if_matches_the_equivalent_dax_if():
+    v = reconcile("SUM(IF [Profit] > 10 THEN [Sales] ELSE 0 END)",
+                  "SUMX('Orders', IF('Orders'[Profit] > 10, 'Orders'[Sales], 0))",
+                  _orders(), resolver=_resolver)
+    assert v["status"] == PASS, v
+
+
+def test_a_flipped_comparison_in_the_candidate_is_caught():
+    v = reconcile("SUM(IF [Profit] > 10 THEN [Sales] ELSE 0 END)",
+                  "SUMX('Orders', IF('Orders'[Profit] < 10, 'Orders'[Sales], 0))",
+                  _orders(), resolver=_resolver)
+    assert v["status"] == FAIL, v
+    assert v["tableau_value"] != v["candidate_value"], v
+
+
+def test_case_when_desugars_onto_the_same_node_as_switch():
+    v = reconcile('SUM(CASE [Category] WHEN "Tech" THEN [Sales] ELSE 0 END)',
+                  'SUMX(\'Orders\', SWITCH(\'Orders\'[Category], "Tech", \'Orders\'[Sales], 0))',
+                  _orders(), resolver=_resolver)
+    assert v["status"] == PASS, v
+
+
+def test_elseif_chain_matches_switch_over_true():
+    v = reconcile("SUM(IF [Profit] > 15 THEN 100 ELSEIF [Profit] > 7 THEN 10 ELSE 1 END)",
+                  "SUMX('Orders', SWITCH(TRUE(), 'Orders'[Profit] > 15, 100, "
+                  "'Orders'[Profit] > 7, 10, 1))",
+                  _orders(), resolver=_resolver)
+    assert v["status"] == PASS, v
+
+
+def test_a_reordered_elseif_chain_is_caught():
+    # Branch ORDER is semantics, not style: testing the looser condition first changes the answer.
+    v = reconcile("SUM(IF [Profit] > 15 THEN 100 ELSEIF [Profit] > 7 THEN 10 ELSE 1 END)",
+                  "SUMX('Orders', SWITCH(TRUE(), 'Orders'[Profit] > 7, 10, "
+                  "'Orders'[Profit] > 15, 100, 1))",
+                  _orders(), resolver=_resolver)
+    assert v["status"] == FAIL, v
+
+
+def test_iif_matches_if():
+    v = reconcile('SUM(IIF([Category] = "Tech", [Sales], 0))',
+                  'SUMX(\'Orders\', IF(\'Orders\'[Category] = "Tech", \'Orders\'[Sales], 0))',
+                  _orders(), resolver=_resolver)
+    assert v["status"] == PASS, v
+
+
+def test_and_or_not_agree_across_word_and_operator_spellings():
+    tableau = 'SUM(IF [Profit] > 5 AND NOT [Category] = "Toys" THEN [Sales] ELSE 0 END)'
+    for candidate in (
+        "SUMX('Orders', IF(AND('Orders'[Profit] > 5, NOT('Orders'[Category] = \"Toys\")), "
+        "'Orders'[Sales], 0))",
+        "SUMX('Orders', IF('Orders'[Profit] > 5 && NOT('Orders'[Category] = \"Toys\"), "
+        "'Orders'[Sales], 0))",
+    ):
+        v = reconcile(tableau, candidate, _orders(), resolver=_resolver)
+        assert v["status"] == PASS, (candidate, v)
+
+
+def test_or_is_not_silently_translated_as_and():
+    v = reconcile('SUM(IF [Profit] > 15 OR [Category] = "Toys" THEN [Sales] ELSE 0 END)',
+                  'SUMX(\'Orders\', IF(AND(\'Orders\'[Profit] > 15, '
+                  '\'Orders\'[Category] = "Toys"), \'Orders\'[Sales], 0))',
+                  _orders(), resolver=_resolver)
+    assert v["status"] == FAIL, v
+
+
+def test_missing_else_matches_an_explicit_blank():
+    # Tableau IF with no ELSE yields NULL; DAX IF with no third argument yields BLANK. The two must
+    # land on the same node, or every ELSE-less conditional would read as a disagreement.
+    v = reconcile("SUM(IF [Profit] > 10 THEN [Sales] END)",
+                  "SUMX('Orders', IF('Orders'[Profit] > 10, 'Orders'[Sales], BLANK()))",
+                  _orders(), resolver=_resolver)
+    assert v["status"] == PASS, v
+
+
+def test_a_scalar_conditional_over_aggregations_is_decided():
+    v = reconcile("IF SUM([Profit]) > 0 THEN SUM([Sales]) ELSE 0 END",
+                  "IF(SUM('Orders'[Profit]) > 0, SUM('Orders'[Sales]), 0)",
+                  _orders(), resolver=_resolver)
+    assert v["status"] == PASS, v
+
+
+def test_a_text_returning_conditional_is_inconclusive_not_passed():
+    # Both sides are identical, but there is no NUMBER to reconcile. Claiming PASS here would be
+    # claiming a proof the oracle never performed.
+    dax = 'IF(SUM(\'Orders\'[Profit]) > 0, "up", "down")'
+    v = reconcile('IF SUM([Profit]) > 0 THEN "up" ELSE "down" END', dax,
+                  _orders(), resolver=_resolver)
+    assert v["status"] == INCONCLUSIVE, v
+
+
+def test_a_comparison_against_an_incomparable_type_never_manufactures_a_verdict():
+    # [Category] is text; comparing it to a number is unknown, not false. Unknown -> ELSE on both
+    # sides -> both are 0 -> equal, but only because the oracle refused to guess an ordering.
+    v = reconcile("SUM(IF [Category] > 5 THEN [Sales] ELSE 0 END)",
+                  "SUMX('Orders', IF('Orders'[Category] > 5, 'Orders'[Sales], 0))",
+                  _orders(), resolver=_resolver)
+    assert v["status"] in (PASS, INCONCLUSIVE), v
+
+
+def test_a_conditional_spanning_two_tables_is_refused():
+    # If the walker missed the branch bodies, the second table would go unnoticed and the oracle
+    # would evaluate against one table's rows -- a manufactured disagreement.
+    schema = dict(_SCHEMA, Other=("Returns", "Flag", "string"))
+    v = reconcile("SUM(IF [Other] = \"y\" THEN [Sales] ELSE 0 END)",
+                  "SUMX('Orders', IF('Returns'[Flag] = \"y\", 'Orders'[Sales], 0))",
+                  _orders(), resolver=lambda c: schema.get(c))
+    assert v["status"] == INCONCLUSIVE, v
+    assert "table" in v["reason"].lower()
+
+
+def test_conditional_columns_are_excluded_from_the_auto_grain():
+    # A column used only inside a condition is still a measure input; grouping by it would compare
+    # each branch against itself and weaken the check.
+    ast = ro._TableauParser(
+        ro._tokenize('SUM(IF [Category] = "Tech" THEN [Sales] ELSE 0 END)'), _resolver).parse()
+    assert ro._columns_of(ast, set()) == {"Category", "Sales"}
+
+
+def test_malformed_conditionals_stay_inconclusive_and_never_raise():
+    for formula in ("IF [Profit] THEN", "CASE [Category] END", "IF THEN ELSE END",
+                    "IIF([Profit] > 0)", "CASE WHEN THEN END", "IF [Profit] > 0 THEN 1"):
+        v = reconcile(formula, "SUM('Orders'[Sales])", _orders(), resolver=_resolver)
+        assert v["status"] == INCONCLUSIVE, (formula, v)

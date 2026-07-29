@@ -22,10 +22,12 @@ Three outcomes per expression, and the difference between them is the entire poi
 - **unproven** -- the oracle could not decide (outside its supported subset, multi-table, no landed
   rows for that table). Translated, not checked. Reported with a reason, never as a pass.
 
-Expect ``unproven`` to dominate on a first run. The oracle's v1 subset is arithmetic over single-column
-aggregations on one table, so a realistic estate reports a minority verified. That is the honest
-number; a small proven count is worth more than a large translated one, and this module exists to stop
-those two being confused.
+Expect ``unproven`` to dominate on a first run. The oracle's subset is arithmetic and conditionals over
+single-column aggregations on one table, so a realistic estate reports a minority verified. That is the
+honest number; a small proven count is worth more than a large translated one, and this module exists to
+stop those two being confused. The reason buckets are the point of the report as much as the counts are:
+they say which limit an estate is actually hitting, so the next thing to widen is measured rather than
+guessed.
 
 Pure stdlib. Read-only. Fail-safe: any error on one expression is recorded as unproven, never raised.
 """
@@ -81,7 +83,8 @@ def align_table_names(table_csv_paths, table_names):
 # These buckets are what a reader actually needs: which LIMIT stopped the check, and can they lift it.
 _REASON_BUCKETS = (
     ("outside oracle subset", "expression is outside the oracle's supported subset"),
-    ("zero or multiple tables", "expression spans zero or multiple tables (the oracle is single-table)"),
+    ("multiple tables", "expression spans multiple tables (the oracle is single-table)"),
+    ("no table at all", "expression references no table, so there is nothing to evaluate it over"),
     ("no landed data", "no rows landed for that table"),
     ("more than max_rows", "table is too large to evaluate"),
     ("no comparable", "no non-null grain to compare at"),
