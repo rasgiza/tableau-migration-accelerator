@@ -2975,18 +2975,66 @@ def _normalize_match_key(name):
     return raw.strip().lower()
 
 
-def _match_csv_path(relation, csv_index, *, single_default=None):
+# A Tableau extract stamps each of its tables with a 32-hex GUID, so a .hyper lands
+# ``Extract_Orders_5043CEDD90404865BA448E7254C82A3D.csv`` for a table the .tds calls ``Orders``.
+# Exact-name matching therefore misses EVERY table of a multi-table extract, and a missed match is
+# not cosmetic: the relation gets no ``flatfile_path``, falls through to a path scaffold, and the
+# customer opens a model that loads nothing. (The single-table case was masked by ``single_default``.)
+_EXTRACT_GUID_SUFFIX = re.compile(r"_[0-9a-f]{32}$")
+
+
+def _extract_alias_key(key):
+    """Strip a Tableau extract's GUID suffix / ``Extract_`` prefix off an already-normalized key.
+
+    Returns ``None`` when nothing was stripped, so the caller can tell an alias apart from a name
+    that already matches exactly.
+    """
+    alias = _EXTRACT_GUID_SUFFIX.sub("", key or "")
+    if alias.startswith("extract_"):
+        alias = alias[len("extract_"):]
+    return alias if (alias and alias != key) else None
+
+
+def _csv_alias_index(csv_index):
+    """Build ``{alias_key: path}`` for extract-stamped CSV names, refusing every ambiguous alias.
+
+    Two guards, both deliberate. An alias that collides with a REAL key is dropped, so a genuine
+    table named ``Orders`` is never shadowed by ``Orders_<guid>``. An alias claimed by two different
+    files (a workbook with two extract islands that each carry an ``Orders``) is dropped as well:
+    binding a table to the wrong file would load plausible-looking WRONG data into the customer's
+    report, which is far worse than the honest scaffold that says the path still needs setting.
+    """
+    alias, ambiguous = {}, set()
+    for key, path in (csv_index or {}).items():
+        cand = _extract_alias_key(key)
+        if not cand or cand in csv_index:
+            continue
+        if cand in alias and alias[cand] != path:
+            ambiguous.add(cand)
+        else:
+            alias[cand] = path
+    for cand in ambiguous:
+        alias.pop(cand, None)
+    return alias
+
+
+def _match_csv_path(relation, csv_index, *, single_default=None, alias_index=None):
     """Resolve the local CSV path for one relation from a ``{normalized_name: path}`` index.
 
-    Tries the relation's display name then its ``item`` by normalized key. ``single_default`` is
-    used when the model has exactly one table and exactly one CSV (the dominant single-fact-table
-    extract case), so a name mismatch between the ``.tds`` table and the ``.hyper`` table still
-    binds. Returns ``None`` on a miss.
+    Tries the relation's display name then its ``item`` by normalized key, then -- only after every
+    exact candidate has missed -- the extract-alias index built by :func:`_csv_alias_index`, so an
+    exact name always wins over a GUID-stripped one. ``single_default`` is used when the model has
+    exactly one table and exactly one CSV (the dominant single-fact-table extract case), so a name
+    mismatch between the ``.tds`` table and the ``.hyper`` table still binds. Returns ``None`` on a
+    miss.
     """
-    for cand in (_table_display(relation), relation.get("item")):
-        key = _normalize_match_key(cand)
+    cands = [_normalize_match_key(c) for c in (_table_display(relation), relation.get("item"))]
+    for key in cands:
         if key in csv_index:
             return csv_index[key]
+    for key in cands:
+        if key and alias_index and key in alias_index:
+            return alias_index[key]
     return single_default
 
 
@@ -3072,6 +3120,7 @@ def assemble_local_import_model(descriptor, *, model_name, table_csv_paths, calc
     """
     csv_index = {_normalize_match_key(k): v for k, v in (table_csv_paths or {}).items()}
     csv_values = list((table_csv_paths or {}).values())
+    alias_index = _csv_alias_index(csv_index)
 
     table_rels = [r for r in descriptor.get("relations", [])
                   if r.get("kind") in ("table", "custom_sql")]
@@ -3083,7 +3132,8 @@ def assemble_local_import_model(descriptor, *, model_name, table_csv_paths, calc
     for rel in table_rels:
         disp = _table_display(rel)
         surviving.append(disp)
-        csv_path = _match_csv_path(rel, csv_index, single_default=single_default)
+        csv_path = _match_csv_path(rel, csv_index, single_default=single_default,
+                                   alias_index=alias_index)
         rel2 = {**rel, "connection": None}  # one CSV connection -> no per-table routing
         if csv_path:
             rel2["flatfile_path"] = csv_path

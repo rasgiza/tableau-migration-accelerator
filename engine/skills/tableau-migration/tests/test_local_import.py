@@ -489,3 +489,86 @@ def test_openability_selfcheck_ok_after_phantom_dedupe(tmp_path):
     assert gate["checks"]["no_duplicate_columns"] is True
     assert gate["checks"]["typed_columns_in_header"] is True
 
+
+
+# -- rm-extract-guid-alias: bind a multi-table extract whose CSVs carry Tableau's GUID stamp -------
+# A .hyper lands one CSV per table stamped with the extract's 32-hex GUID
+# (``Extract_Orders_5043CEDD90404865BA448E7254C82A3D``) for a table the .tds simply calls ``Orders``.
+# Exact-name matching missed every table of a multi-table extract, so each relation fell through to a
+# path scaffold and the customer opened a model that loaded nothing. The single-table case was masked
+# by ``single_default``, which is why this only showed up on real multi-table workbooks.
+
+def test_guid_stamped_extract_csvs_bind_to_their_model_tables(tmp_path):
+    from connection_to_m import parse_tds
+    orders = _write_csv(str(tmp_path / "Extract_Orders_5043CEDD90404865BA448E7254C82A3D.csv"),
+                        ["OrderId"], [[1]])
+    regions = _write_csv(str(tmp_path / "Extract_Regions_ECFCA1FB690A41FE803BC071773BA862.csv"),
+                         ["RegionName"], [["East"]])
+    result = A.assemble_local_import_model(
+        parse_tds(TWO_TABLE_TDS), model_name="Feed",
+        table_csv_paths={"Extract.Orders_5043CEDD90404865BA448E7254C82A3D": orders,
+                         "Extract.Regions_ECFCA1FB690A41FE803BC071773BA862": regions})
+    li = result["report"]["local_import"]
+    assert li["matched_count"] == 2, li
+    assert li["unmatched_tables"] == []
+    bound = {m["table"]: m["csv_path"] for m in li["matched"]}
+    assert bound["Orders"] == orders and bound["Regions"] == regions
+
+
+def test_a_guid_stamped_partition_is_a_real_csv_body_not_a_scaffold(tmp_path):
+    """The point of the alias: the emitted M must actually read the landed file."""
+    from connection_to_m import parse_tds
+    orders = _write_csv(str(tmp_path / "Extract_Orders_5043CEDD90404865BA448E7254C82A3D.csv"),
+                        ["OrderId"], [[1]])
+    regions = _write_csv(str(tmp_path / "Extract_Regions_ECFCA1FB690A41FE803BC071773BA862.csv"),
+                         ["RegionName"], [["East"]])
+    result = A.assemble_local_import_model(
+        parse_tds(TWO_TABLE_TDS), model_name="Feed",
+        table_csv_paths={"Extract.Orders_5043CEDD90404865BA448E7254C82A3D": orders,
+                         "Extract.Regions_ECFCA1FB690A41FE803BC071773BA862": regions})
+    tmdl = result["parts"]["definition/tables/Orders.tmdl"]
+    assert "Csv.Document" in tmdl
+    assert orders.replace("\\", "\\\\") in tmdl or orders in tmdl
+    assert "TODO" not in tmdl
+
+
+def test_an_exact_table_name_always_beats_a_guid_stripped_alias():
+    """A real table named ``Orders`` must never be shadowed by ``Orders_<guid>``."""
+    idx = {"orders": "/real/orders.csv",
+           "orders_5043cedd90404865ba448e7254c82a3d": "/stamped/orders.csv"}
+    assert A._csv_alias_index(idx) == {}
+    rel = {"kind": "table", "name": "Orders", "item": "Orders"}
+    assert A._match_csv_path(rel, idx, alias_index=A._csv_alias_index(idx)) == "/real/orders.csv"
+
+
+def test_two_extract_islands_with_the_same_table_name_refuse_to_bind():
+    """Ambiguity must scaffold, not guess.
+
+    Binding a table to the wrong island's file would load plausible-looking WRONG data into the
+    customer's report -- strictly worse than an honest 'set the file path' scaffold.
+    """
+    idx = {"orders_5043cedd90404865ba448e7254c82a3d": "/island-a/orders.csv",
+           "orders_ecfca1fb690a41fe803bc071773ba862": "/island-b/orders.csv"}
+    assert A._csv_alias_index(idx) == {}
+    rel = {"kind": "table", "name": "Orders", "item": "Orders"}
+    assert A._match_csv_path(rel, idx, alias_index=A._csv_alias_index(idx)) is None
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("orders_5043cedd90404865ba448e7254c82a3d", "orders"),
+    ("extract_orders_5043cedd90404865ba448e7254c82a3d", "orders"),
+    ("extract_extract", "extract"),
+    ("orders", None),                                   # nothing to strip
+    ("extract", None),                                  # bare prefix, not a stamped name
+    ("orders_5043cedd", None),                          # too short to be a GUID
+    ("orders_5043CEDD90404865BA448E7254C82A3D", None),  # index keys are normalized lowercase
+    ("", None),
+    (None, None),
+])
+def test_alias_key_only_strips_a_real_extract_stamp(key, expected):
+    assert A._extract_alias_key(key) == expected
+
+
+@pytest.mark.parametrize("idx", [None, {}, {"": "/x.csv"}, {None: "/x.csv"}])
+def test_alias_index_tolerates_malformed_input(idx):
+    assert A._csv_alias_index(idx) == {}
