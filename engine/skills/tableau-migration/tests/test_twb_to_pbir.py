@@ -48,6 +48,7 @@ from twb_to_pbir import (
     parse_twb,
     report_json_part,
     report_json_part_fp,
+    _param_column_filter_target,
 )
 
 # -- shared datasource (the workbook embeds the full relation + metadata tree) --
@@ -6028,3 +6029,56 @@ def test_measure_names_deferral_is_silent_only_when_the_value_well_reproduces_it
     for too_few in (0, 1, None):
         note = _measure_names_deferral("W", too_few)
         assert note is not None and "not reproduced" in json.dumps(note)
+
+
+# -- all-or-one parameter filter calcs -> a slicer on the column they gate ------------------------
+def test_all_or_one_parameter_filter_resolves_to_the_column_it_gates():
+    """The two shapes this pattern is written in across a real estate both resolve."""
+    assert _param_column_filter_target(
+        "IF [Parameters].[Parameter 3] = 'All' THEN 1=1 "
+        "ELSE [Category]=[Parameters].[Parameter 3] END") == "Category"
+    assert _param_column_filter_target(
+        '[Parameters].[Parameter 3] = "US" OR [Parameters].[Parameter 3] = [Region]') == "Region"
+    # A bare equality gate is the same pattern without the "All" escape hatch.
+    assert _param_column_filter_target(
+        "[Parameters].[Customer ID Parameter] = [Customer ID]") == "Customer ID"
+
+
+def test_a_range_comparison_is_not_rebuilt_as_a_categorical_slicer():
+    """``>=``/``<=`` against a parameter needs the parameter's BOUNDS, which the workbook does not
+    give us. A categorical slicer would silently widen the window, so refuse."""
+    assert _param_column_filter_target(
+        "[Order Date] >= [Parameters].[Start] AND [Order Date] <= [Parameters].[End]") is None
+    assert _param_column_filter_target("[Sales] > [Parameters].[Threshold]") is None
+    assert _param_column_filter_target("[Region] != [Parameters].[Excluded]") is None
+
+
+def test_a_formula_touching_two_columns_has_no_single_slicer_target():
+    assert _param_column_filter_target(
+        "[Category] = [Parameters].[P] AND [Region] = [Parameters].[P]") is None
+
+
+def test_a_formula_with_no_parameter_reference_is_not_this_pattern():
+    """A plain row-level bucket calc already lands as a real sliceable column; it must not be
+    re-routed through the parameter path."""
+    assert _param_column_filter_target("IF [Sales] = 1 THEN [Category] END") is None
+    assert _param_column_filter_target("") is None
+    assert _param_column_filter_target(None) is None
+
+
+def test_an_aggregation_or_unrecognised_call_is_refused():
+    assert _param_column_filter_target(
+        "SUM([Sales]) = [Parameters].[Target]") is None
+    assert _param_column_filter_target(
+        "YEAR([Order Date]) = [Parameters].[Year Parameter]") is None
+
+
+def test_the_parameter_datasource_itself_is_never_the_slicer_target():
+    """``[Parameters].[X]`` alone gates nothing in the model -- there is no column to slice."""
+    assert _param_column_filter_target("[Parameters].[Parameter 3] = 'All'") is None
+
+
+def test_a_string_literal_that_looks_like_a_field_is_not_mistaken_for_one():
+    assert _param_column_filter_target(
+        "IF [Parameters].[P] = '[All]' THEN 1=1 ELSE [Category] = [Parameters].[P] END"
+    ) == "Category"

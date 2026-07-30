@@ -1465,6 +1465,73 @@ def _dedupe_str(values):
     return out
 
 
+# -- "All-or-one parameter" filter calcs ---------------------------------------
+# Tableau has no native "let the user pick a category" control, so authors fake one with a boolean
+# calc that compares a parameter to a column and escapes on a sentinel:
+#
+#     IF [Parameters].[P] = 'All' THEN 1=1 ELSE [Category] = [Parameters].[P] END
+#     [Parameters].[P] = "US" OR [Parameters].[P] = [Region]
+#
+# Power BI needs none of that scaffolding: a slicer on the column IS the control, and the parameter
+# and the calc both disappear. Recognising the shape lets the rebuild emit the interaction the author
+# actually wanted instead of dropping the filter and telling the customer to sort it out by hand.
+#
+# Everything about this recogniser is deliberately narrow, because a WRONG slicer silently changes
+# the numbers a report shows -- far worse than the honest warning it replaces. It only fires when the
+# formula is pure comparison logic over exactly ONE real column, so anything with an aggregation, a
+# transform, arithmetic, or a second column falls through to the existing warn-and-drop path.
+_PARAM_REF_RE = re.compile(r"\[Parameters\]\s*\.\s*\[[^\]]+\]", re.I)
+_BRACKET_REF_RE = re.compile(r"\[([^\]]+)\]")
+# Tokens allowed to remain once parameter refs, column refs and literals are removed. Comparison and
+# boolean logic only -- an aggregation or a transform means the calc is not a plain row-level filter.
+_ALLOWED_FILTER_WORDS = {"IF", "THEN", "ELSE", "ELSEIF", "END", "AND", "OR", "NOT", "TRUE", "FALSE"}
+_STRING_LITERAL_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _param_column_filter_target(formula):
+    """The single column an all-or-one parameter filter calc gates on, or ``None``.
+
+    Returns the bracket-stripped column name (e.g. ``"Category"``) only when the formula is pure
+    comparison logic between one or more ``[Parameters].[...]`` references and exactly one real
+    column. Returns ``None`` -- meaning "keep the existing warn-and-drop behaviour" -- for anything
+    else, including the cases that look tempting but are not equivalent to a slicer:
+
+    - **no parameter reference**: not this pattern at all.
+    - **zero or several columns**: there is no single column for the slicer to bind, and picking one
+      of several would change what the report shows.
+    - **any function call, arithmetic, or comparison operator other than equality**: ``[Sales] >
+      [Parameters].[Threshold]`` is a genuine measure filter, not a category picker, and a slicer on
+      ``Sales`` would not reproduce it.
+    """
+    text = (formula or "").strip()
+    if not text or not _PARAM_REF_RE.search(text):
+        return None
+    # Strip parameter refs and string literals first so their contents can never be mistaken for
+    # column references or stray operators.
+    stripped = _PARAM_REF_RE.sub(" ", text)
+    stripped = _STRING_LITERAL_RE.sub(" ", stripped)
+
+    columns = _dedupe_str([c.strip() for c in _BRACKET_REF_RE.findall(stripped) if c.strip()])
+    if len(columns) != 1:
+        return None
+    target = columns[0]
+    if target.lower() == "parameters":
+        return None
+
+    residue = _BRACKET_REF_RE.sub(" ", stripped)
+    # Equality is the only comparison a slicer reproduces. Reject <, >, <=, >=, != outright; the
+    # ``1=1`` / ``0=1`` all-pass sentinels are bare numbers and survive the digit strip below.
+    if re.search(r"[<>]|!=", residue):
+        return None
+    residue = residue.replace("==", " ").replace("=", " ")
+    residue = re.sub(r"[()\.,]", " ", residue)
+    residue = re.sub(r"\b\d+(?:\.\d+)?\b", " ", residue)
+    for word in residue.split():
+        if word.upper() not in _ALLOWED_FILTER_WORDS:
+            return None
+    return target
+
+
 def _parse_filters(ws, ds_default, base_cols, instances, index, ds_caption,
                    worksheet, warnings, warn_special=True, internal_fields=None):
     """Returns ``(filters, swap_controls)``. ``swap_controls`` carries any parameter-driven
@@ -1507,6 +1574,40 @@ def _parse_filters(ws, ds_default, base_cols, instances, index, ds_caption,
         _calc_unsliceable = f["is_calc"] and (
             f["role"] == "measure" or "[Parameters]" in _calc_formula)
         if f["binding"] == "aggregation" or _calc_unsliceable:
+            # ...unless the calc is an all-or-one parameter picker, whose whole purpose is to let
+            # the user choose a value of ONE column. Power BI expresses that as a slicer on that
+            # column directly, so rebuild the interaction the author wanted rather than dropping it.
+            _target = (None if f["binding"] == "aggregation"
+                       else _param_column_filter_target(_calc_formula))
+            _resolved = None
+            if _target:
+                # ``base_cols`` is keyed by the BARE column name ("Category"), not the bracketed
+                # form the formula spells it with, so resolve on the stripped name.
+                _resolved = _resolve_field(ds or ds_default, _target, base_cols, instances,
+                                           index, ds_caption, worksheet, [],
+                                           warn_special=False, internal_fields=internal_fields)
+            # Only a plain, non-calculated, non-aggregated column can carry this faithfully.
+            if _resolved and not _resolved["is_calc"] and _resolved["binding"] != "aggregation":
+                _slicer = dict(_resolved)
+                _slicer["filter_kind"] = "categorical"
+                _slicer["binding"] = "column"
+                _slicer["aggregation"] = None
+                _slicer["filter_token"] = (ds, fid)
+                # The parameter's chosen value is not in the workbook, so the slicer opens on its
+                # full domain. That is the same set the author's "All" sentinel shows, but it is a
+                # real difference from a parameter pinned to one member -- so say so.
+                _slicer["selection"] = None
+                _slicer["range"] = None
+                # Stamped so a model keep-flag -- which reproduces the calc's real predicate and is
+                # therefore the BETTER translation -- can supersede this fallback slicer later.
+                _slicer["param_filter_token"] = f["caption"]
+                filters.append(_slicer)
+                warnings.append(_warn(
+                    "worksheet", worksheet,
+                    f"parameter filter '{f['caption']}' rebuilt as a slicer on "
+                    f"'{_resolved['caption']}' (opens on all values; Tableau's parameter default "
+                    f"is not carried over)"))
+                continue
             warnings.append(_warn(
                 "worksheet", worksheet,
                 f"aggregate/measure filter on '{f['caption']}' is not mapped to a slicer "
@@ -3528,14 +3629,35 @@ def _resolve_visual_flags(param_binding, ws_by_name, warnings):
                 _flag_filter_container(entity, measure, literal, name))
             resolved.append((ws_name, token))
     if resolved:
+        _drop_redundant_param_slicers(ws_by_name, resolved)
         _drop_resolved_flag_warnings(warnings, resolved)
     return by_ws
 
 
+def _drop_redundant_param_slicers(ws_by_name, resolved):
+    """Remove the fallback parameter slicer for every ``(worksheet, token)`` a keep-flag rebuilt.
+
+    :func:`_parse_filters` cannot see ``param_binding``, so it optimistically rebuilds an
+    all-or-one parameter filter calc as a slicer on the column it gates. When the model later
+    proves it translated that same calc into a keep-flag measure, the measure filter reproduces
+    the calc's ACTUAL predicate while the slicer only reproduces the choice of column -- so the
+    slicer is redundant and would put an unwanted control on the canvas. Drop it and keep the
+    stronger translation. Mutates each worksheet's ``filters`` in place."""
+    obsolete = set(resolved)
+    for ws_name, token in obsolete:
+        ws = ws_by_name.get(ws_name)
+        if not ws:
+            continue
+        ws["filters"] = [f for f in (ws.get("filters") or [])
+                         if f.get("param_filter_token") != token]
+
+
 def _drop_resolved_flag_warnings(warnings, resolved):
-    """Drop the now-obsolete parse-time "aggregate/measure filter on '<token>'" warnings for the
-    ``(worksheet, token)`` pairs a model keep-flag rebuilt. Mutates ``warnings`` in place; every other
-    warning is preserved (this only ever REMOVES an advisory the model superseded)."""
+    """Drop the now-obsolete parse-time filter advisories for the ``(worksheet, token)`` pairs a
+    model keep-flag rebuilt -- both the "aggregate/measure filter on '<token>'" warning and the
+    "parameter filter '<token>' rebuilt as a slicer" fallback advisory, since the keep-flag
+    supersedes each of them. Mutates ``warnings`` in place; every other warning is preserved
+    (this only ever REMOVES an advisory the model superseded)."""
     obsolete = set(resolved)
     kept = []
     for w in warnings:
@@ -3543,8 +3665,10 @@ def _drop_resolved_flag_warnings(warnings, resolved):
         if isinstance(w, dict) and w.get("scope") == "worksheet":
             reason = w.get("reason") or ""
             for ws_name, token in obsolete:
-                if (w.get("name") == ws_name
-                        and f"aggregate/measure filter on '{token}'" in reason):
+                if w.get("name") != ws_name:
+                    continue
+                if (f"aggregate/measure filter on '{token}'" in reason
+                        or f"parameter filter '{token}' rebuilt as a slicer" in reason):
                     drop = True
                     break
         if not drop:

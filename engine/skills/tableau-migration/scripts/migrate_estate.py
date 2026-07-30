@@ -1199,6 +1199,7 @@ def _rebind_report_to_semantic_models(report_dir, sm_dir):
 
 _FIDELITY_DEFERRAL_MARKERS = (
     "aggregate/measure filter on ",   # B7: dropped aggregate/measure filter (visual renders without it)
+    "rebuilt as a slicer on ",        # all-or-one parameter filter rebuilt as a slicer (opens on all)
     "grain not applied",              # date-grain approximation, fail-closed (visual still renders)
     "default continuous palette",     # colour scale fell back to Tableau's default palette (approx)
     "default palette",
