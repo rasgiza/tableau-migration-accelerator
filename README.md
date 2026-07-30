@@ -14,6 +14,12 @@ and clearly flags the 20% that stays a human decision (complex LOD/table calcs,
 ambiguous relationships, storage-mode choice, native-source rebind). This folder
 proves that with a real offline run.
 
+Here is the actual output of one command against a **13-workbook test estate** — not a mock-up,
+not a roadmap. Every number below is generated, and the middle and right columns are the ones
+most tools never show you:
+
+![Migration outcome — what translated, what needs a human, what will not migrate](docs/images/migration-outcome.png)
+
 ## Contents
 
 A map of this README and the deep-dive docs, so anyone can jump straight to what they need.
@@ -668,6 +674,36 @@ Concretely, the report shows you:
 **Why this matters:** at estate scale, *"here is exactly what a human still needs to finish, and
 why"* is worth more than the raw conversion percentage. The flagged worklist is precisely the
 punch-list you (or a partner) work through — instead of discovering weeks later what quietly broke.
+
+### What the report actually looks like
+
+These are unedited screenshots of the report produced by a single run against the 13-workbook
+`customer-estate/` corpus. Nothing here is hand-written — [reproduce it yourself](#reproduce-the-run)
+and you will get the same page.
+
+**It opens by telling you what to do next, ranked from the run's own facts:**
+
+![Prioritized next actions from the run](docs/images/next-actions.png)
+
+**It grades every single view, worst first — including the ones it failed to rebuild:**
+
+![Per-dashboard visual fidelity table with Faithful, Safe deferral, Degraded and Unsupported verdicts](docs/images/visual-fidelity.png)
+
+That `21% faithful rebuild rate` is deliberately on the front page. Tableau→Power BI *visual*
+conversion is an unsolved problem industry-wide — the honest thing is to publish the number and
+name the 226 views that need a human, not to bury it. Note the distinction the report draws
+between **Degraded** (material fidelity loss) and **Safe deferral** (renders correctly, minus one
+documented fail-closed feature). Verdicts are structural, derived from chart family and field
+bindings — not a pixel comparison, and the report says so.
+
+**And it signs off per workbook, with the reason when it could not finish:**
+
+![Per-workbook sign-off table showing bound models, PBIP paths and failure reasons](docs/images/workbook-signoff.png)
+
+Three of the thirteen workbooks are marked `FAILED` with the specific cause — two of them bundle a
+legacy `.tde` extract (Tableau < 10.5) whose schema cannot be read at all. The report tells you
+that, and tells you the fix (re-save in a current Tableau version, or supply a live connection),
+rather than emitting a broken model.
 
 ## Planning a large estate (e.g. 150+ workbooks) — what to expect
 
