@@ -1,4 +1,107 @@
 {
+  "assessment": {
+    "by_workbook": [
+      {
+        "complexity": {
+          "bucket": "Simple",
+          "score": 1
+        },
+        "difficulty": {
+          "band": "Low",
+          "drivers": {
+            "calculations": 1,
+            "custom_sql": 0,
+            "lod_expressions": 0,
+            "nested_calcs": 0,
+            "parameter_driven_calcs": 0,
+            "table_calcs": 0
+          },
+          "formula": "score = min(100, 3*LOD + 3*table_calcs + nested_calcs + parameter_driven_calcs + 8*custom_sql + 0.2*calculations)",
+          "score": 0.2
+        },
+        "name": "Superstore",
+        "orphaned_worksheets": 1,
+        "unused_fields": 0
+      }
+    ],
+    "complexity": {
+      "bucket": "Simple",
+      "max_score": 1
+    },
+    "difficulty": {
+      "band": "Low",
+      "formula": "score = min(100, 3*LOD + 3*table_calcs + nested_calcs + parameter_driven_calcs + 8*custom_sql + 0.2*calculations)",
+      "max_score": 0.2
+    },
+    "orphaned_worksheets_total": 1,
+    "surface_area": {
+      "calculations": 1,
+      "dashboards": 1,
+      "fields_defined": 6,
+      "lod_expressions": 0,
+      "parameters": 0,
+      "table_calcs": 0,
+      "worksheets": 3
+    },
+    "unused_fields_total": 0,
+    "workbooks": 1
+  },
+  "copilot_readiness": {
+    "checks": [
+      {
+        "detail": "All 1 datasource(s) produced a semantic model.",
+        "id": "datasources",
+        "label": "Datasources migrated",
+        "metric": 100.0,
+        "status": "pass"
+      },
+      {
+        "detail": "1 of 3 measure(s) are inert stubs -- Copilot would answer from placeholder 0s.",
+        "id": "measures",
+        "label": "Measures translated (no inert stubs)",
+        "metric": 66.7,
+        "status": "fail"
+      },
+      {
+        "detail": "No calculated columns were migrated.",
+        "id": "calc_columns",
+        "label": "Calculated columns translated",
+        "metric": null,
+        "status": "na"
+      },
+      {
+        "detail": "Every measure carries a provenance description scaffold; add business meaning (see guidance) for the strongest grounding.",
+        "id": "descriptions",
+        "label": "Field descriptions for Copilot grounding",
+        "metric": null,
+        "status": "pass"
+      },
+      {
+        "detail": "2 synonym term(s) harvested across 1 datasource(s).",
+        "id": "synonyms",
+        "label": "Q&A synonyms (linguistic culture)",
+        "metric": null,
+        "status": "pass"
+      }
+    ],
+    "enabled": true,
+    "guidance": [
+      "You do NOT have to describe every field. The scaffold is safe and openable as-is; enrich only the fields users actually ask about -- the VISIBLE measures and the columns people slice by (region, product, service line). That is usually a few dozen fields, not thousands.",
+      "Add business descriptions where it counts: the auto-generated measure descriptions record PROVENANCE (where a field came from), not what it MEANS. Tableau workbooks rarely carry field descriptions, so replace them with a short plain-language definition on your key measures and slicer columns -- the single biggest lever on Copilot / Q&A answer quality.",
+      "HIDE, don't describe, the plumbing: surrogate keys, ID columns, and technical/staging fields need no description at all -- just hide them so Copilot ignores them. This removes most of the model from the 'to-do' list before you write a single description.",
+      "Curate Q&A synonyms: the harvested synonyms come only from Tableau captions that differ from the model column name. Add the words your users actually say -- abbreviations, business jargon, and alternate names -- so Copilot maps their vocabulary to the model.",
+      "Prep the data for AI: give the fields you kept friendly names, mark the date table, and verify each relationship's cardinality and cross-filter direction. An ambiguous model produces ambiguous answers, however good the DAX.",
+      "This is a one-time curation, not a per-migration tax: descriptions and synonyms you add live in the published semantic model as normal stewardship -- re-running the migration does not redo this work unless you overwrite the model file.",
+      "Resolve the 'needs manual review' stubs before exposing them to Copilot -- an inert stub returns 0, and Copilot will answer from it as if it were real."
+    ],
+    "overall": "not_ready",
+    "totals": {
+      "checks": 5,
+      "failed": 1,
+      "passed": 3,
+      "warned": 0
+    }
+  },
   "datasources": [
     {
       "calc_columns": [],
@@ -7,9 +110,49 @@
       "column_count": 5,
       "column_prune": null,
       "connector": "sqlserver",
+      "copilot_ready": true,
       "dim_calcs": [],
+      "directlake_seam": null,
       "flatfile_landed": null,
       "fully_supported": true,
+      "lineage": [
+        {
+          "calc": "Total Sales",
+          "depends_on_calcs": [],
+          "formula": "SUM([Sales])",
+          "parameters": [],
+          "references": [
+            "Sales"
+          ],
+          "role": "measure"
+        },
+        {
+          "calc": "Profit Ratio",
+          "depends_on_calcs": [],
+          "formula": "SUM([Profit]) / SUM([Sales])",
+          "parameters": [],
+          "references": [
+            "Profit",
+            "Sales"
+          ],
+          "role": "measure"
+        },
+        {
+          "calc": "Running Sales",
+          "depends_on_calcs": [],
+          "formula": "RUNNING_SUM(SUM([Sales]))",
+          "parameters": [],
+          "references": [
+            "Sales"
+          ],
+          "role": "measure"
+        }
+      ],
+      "linguistic": {
+        "entities": 2,
+        "language": "en-US",
+        "terms": 2
+      },
       "m_connector": "Sql.Database",
       "manual_followups": [
         "Configure connection credentials in Fabric (bind links IDs only).",
@@ -66,9 +209,18 @@
       "partitions_needs_review": [],
       "partitions_stubbed": 0,
       "pbip_folder": "pbip/Superstore/Superstore.pbip",
+      "semantics_lint": {
+        "advisory": 0,
+        "blocking": 0,
+        "checked": 2,
+        "clean": 2,
+        "counts": {},
+        "findings": [],
+        "ok": true
+      },
       "skipped_calcs": [],
       "skipped_tables": [],
-      "source_id": "C:\\Users\\kwamesefah\\AppData\\Local\\Temp\\tfmig\\20260717-141149\\in\\Superstore.tds",
+      "source_id": "C:\\Users\\kwamesefah\\AppData\\Local\\Temp\\tfmig\\20260730-101804\\in\\Superstore.tds",
       "status": "migrated",
       "storage_decision": {
         "connector": "Sql.Database",
@@ -154,7 +306,8 @@
             }
           }
         }
-      }
+      },
+      "translation_sweep": null
     }
   ],
   "definition_of_done": {
@@ -167,7 +320,7 @@
       {
         "bound_model": null,
         "pbip_folder": null,
-        "reason": "embedded datasource 'Superstore' needs a storage decision (Connector class 'unknown' is not mapped for direct M; storage decision required -- default to a direct-to-source Import rebuild, or opt in to land-to-Delta + DirectLake (never auto-selected).) -- workbook .pbip skipped (model lands separately)",
+        "reason": "embedded datasource 'Superstore' needs a storage decision -- i.e. how the Power BI model will STORE ITS DATA (Import vs DirectLake), not where your Tableau files live (Connector class 'unknown' is not mapped for direct M; storage decision required -- default to a direct-to-source Import rebuild, or opt in to land-to-Delta + DirectLake (never auto-selected).) -- workbook .pbip skipped (model lands separately)",
         "report_bound": false,
         "status": "failed",
         "workbook": "Superstore"
@@ -176,20 +329,24 @@
     "workbooks_total": 1
   },
   "fallbacks": [],
-  "generated_at": "2026-07-17T19:11:50Z",
+  "generated_at": "2026-07-30T15:18:05Z",
   "source": {
     "kind": "LocalFilesSource",
-    "root": "C:\\Users\\kwamesefah\\AppData\\Local\\Temp\\tfmig\\20260717-141149\\in"
+    "root": "C:\\Users\\kwamesefah\\AppData\\Local\\Temp\\tfmig\\20260730-101804\\in"
   },
   "summary": {
     "calc_columns_stubbed": 0,
     "calc_columns_total": 0,
     "calc_columns_translated": 0,
+    "calcs_numeric_unverified": 0,
+    "calcs_numeric_verified": 0,
     "columns_pruned_hidden_total": 0,
     "columns_translated": 5,
     "connectors_seen": [
       "sqlserver"
     ],
+    "data_assets_landed": 0,
+    "data_not_landed_reasons": {},
     "datasource_pbips_built": 0,
     "datasource_pbips_total": 1,
     "datasources_error": 0,
@@ -202,12 +359,23 @@
     "measures_total": 3,
     "measures_translated": 2,
     "needs_review_total": 1,
+    "numeric_verification_active": false,
     "partitions_stubbed_total": 0,
+    "semantics_advisory": 0,
+    "semantics_blocking": 0,
+    "semantics_checked": 2,
+    "semantics_kinds": {},
     "storage_modes": {
       "DirectQuery": 1,
       "Import": 0,
       "fallback": 0
     },
+    "sweep_checked": 0,
+    "sweep_disagreement_detail": [],
+    "sweep_disagreements": 0,
+    "sweep_unproven": 0,
+    "sweep_unproven_reasons": {},
+    "sweep_verified": 0,
     "tables_translated": 2,
     "visuals_rebuilt": 3,
     "visuals_warned": 0,
@@ -231,6 +399,54 @@
   "tool": "migrate_estate",
   "workbooks": [
     {
+      "assessment": {
+        "complexity": {
+          "bucket": "Simple",
+          "score": 1
+        },
+        "components": [
+          {
+            "impact": "Low",
+            "kind": "aggregation",
+            "name": "Total Sales"
+          }
+        ],
+        "dashboard_map": [
+          {
+            "name": "Executive",
+            "worksheets": [
+              "Sales by Category",
+              "Profit by Region"
+            ]
+          }
+        ],
+        "difficulty": {
+          "band": "Low",
+          "drivers": {
+            "calculations": 1,
+            "custom_sql": 0,
+            "lod_expressions": 0,
+            "nested_calcs": 0,
+            "parameter_driven_calcs": 0,
+            "table_calcs": 0
+          },
+          "formula": "score = min(100, 3*LOD + 3*table_calcs + nested_calcs + parameter_driven_calcs + 8*custom_sql + 0.2*calculations)",
+          "score": 0.2
+        },
+        "orphaned_worksheets": [
+          "Monthly Sales"
+        ],
+        "surface_area": {
+          "calculations": 1,
+          "dashboards": 1,
+          "fields_defined": 6,
+          "lod_expressions": 0,
+          "parameters": 0,
+          "table_calcs": 0,
+          "worksheets": 3
+        },
+        "unused_fields": []
+      },
       "binding_signal": {
         "connection_class": null,
         "kind": "embedded",
@@ -251,9 +467,9 @@
       "pbip_ref_drops": [],
       "pbip_status": "skipped",
       "pbip_warnings": [
-        "manual attention required: embedded datasource 'Superstore' needs a storage decision (Connector class 'unknown' is not mapped for direct M; storage decision required -- default to a direct-to-source Import rebuild, or opt in to land-to-Delta + DirectLake (never auto-selected).) -- workbook .pbip skipped (model lands separately)"
+        "manual attention required: embedded datasource 'Superstore' needs a storage decision -- i.e. how the Power BI model will STORE ITS DATA (Import vs DirectLake), not where your Tableau files live (Connector class 'unknown' is not mapped for direct M; storage decision required -- default to a direct-to-source Import rebuild, or opt in to land-to-Delta + DirectLake (never auto-selected).) -- workbook .pbip skipped (model lands separately)"
       ],
-      "source_id": "C:\\Users\\kwamesefah\\AppData\\Local\\Temp\\tfmig\\20260717-141149\\in\\Superstore.twb",
+      "source_id": "C:\\Users\\kwamesefah\\AppData\\Local\\Temp\\tfmig\\20260730-101804\\in\\Superstore.twb",
       "viz_fidelity": [
         {
           "reason": null,

@@ -1,28 +1,31 @@
 table _Measures
-	lineageTag: 172c76ff-fdc9-4bd3-bafa-48286c463fbe
+	lineageTag: 94180c93-a8dc-48ce-8308-0a03ab396f8c
 
 	column Value
 		dataType: string
 		isHidden
-		lineageTag: d0d435df-2b45-45c2-a6d0-420aaf08f369
+		lineageTag: a3f7d2c4-9392-47b9-ae6f-33b0ce094f0c
 		summarizeBy: none
 		sourceColumn: [Value]
 		type: calculatedTableColumn
 
+	/// Migrated from a Tableau calculation.
 	measure 'Total Sales' = SUM('Orders'[Sales_Amount])
-		lineageTag: dfbd3b8f-21cd-493f-a57e-e139d7ffb66b
+		lineageTag: 14c94695-41d7-48c3-9f88-a4698f73271f
 		annotation TableauFormula = SUM([Sales])
 		annotation TranslatedBy = deterministic
 		annotation SummarizationSetBy = Automatic
 
+	/// Migrated from a Tableau calculation.
 	measure 'Profit Ratio' = DIVIDE(SUM('Orders'[Profit]), SUM('Orders'[Sales_Amount]))
-		lineageTag: b64b5813-c5bb-4fe1-842e-5662ea208055
+		lineageTag: 430b7ad0-c065-4902-adc0-2950b5f94884
 		annotation TableauFormula = SUM([Profit]) / SUM([Sales])
 		annotation TranslatedBy = deterministic
 		annotation SummarizationSetBy = Automatic
 
+	/// Untranslated Tableau calculation -- needs manual review (inert placeholder returning 0).
 	measure 'Running Sales' = 0
-		lineageTag: b89dcc32-26ab-4aec-8db3-d37aabbbd2b6
+		lineageTag: fac12353-e2e8-402c-91bc-76ec94290440
 		annotation TableauFormula = RUNNING_SUM(SUM([Sales]))
 		annotation SummarizationSetBy = Automatic
 

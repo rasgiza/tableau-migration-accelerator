@@ -3,8 +3,7 @@ name: tests
 # Runs the full skills test suite (unit + integration + oracle-certified +
 # the canonical<->plugin mirror-parity guard) on every PR and every push to
 # main. The engine is stdlib-only, so the sole test dependency is pytest.
-# Pairs with version-bump-check.yml: that guards "did you bump VERSION?",
-# this guards "does the payload still work?". Mark both as required checks.
+# This is the guard for "does the payload still work?" -- mark it required.
 
 on:
   pull_request:

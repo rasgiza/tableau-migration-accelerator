@@ -1,12 +1,12 @@
 # Tableau -> Fabric Estate Migration Report
 
-_Generated 2026-07-17T19:11:50Z by `migrate_estate` from LocalFilesSource._
+_Generated 2026-07-30T15:18:05Z by `migrate_estate` from LocalFilesSource._
 
 ## ⛔ DEFINITION OF DONE: FAILED
 
 1 of 1 workbook input(s) produced no openable, model-bound Power BI report. A Tableau workbook migration is not complete until its dashboards are rebuilt and bound into a `.pbip` (see the Workbooks table below).
 
-- **Superstore** -- embedded datasource 'Superstore' needs a storage decision (Connector class 'unknown' is not mapped for direct M; storage decision required -- default to a direct-to-source Import rebuild, or opt in to land-to-Delta + DirectLake (never auto-selected).) -- workbook .pbip skipped (model lands separately)
+- **Superstore** -- embedded datasource 'Superstore' needs a storage decision -- i.e. how the Power BI model will STORE ITS DATA (Import vs DirectLake), not where your Tableau files live (Connector class 'unknown' is not mapped for direct M; storage decision required -- default to a direct-to-source Import rebuild, or opt in to land-to-Delta + DirectLake (never auto-selected).) -- workbook .pbip skipped (model lands separately)
 
 ## Summary
 
@@ -39,6 +39,16 @@ _Generated 2026-07-17T19:11:50Z by `migrate_estate` from LocalFilesSource._
 | Workbook | Viz | Visuals (rebuilt/warned) | Project (.pbip) | Bound model | Note |
 |---|---|---|---|---|---|
 | Superstore | built | 3/0 | - | - |  |
+
+## Calculation lineage
+
+Every calculated field mapped to the source columns it reads (plus calc→calc dependencies and parameter references), extracted deterministically from each formula. Full detail is in `report.json` under each datasource's `lineage`.
+
+| Datasource | Calculation | Role | Reads columns | Depends on calcs | Parameters |
+|---|---|---|---|---|---|
+| Superstore | Total Sales | measure | Sales | - | - |
+| Superstore | Profit Ratio | measure | Profit, Sales | - | - |
+| Superstore | Running Sales | measure | Sales | - | - |
 
 ## Audit guarantees
 
