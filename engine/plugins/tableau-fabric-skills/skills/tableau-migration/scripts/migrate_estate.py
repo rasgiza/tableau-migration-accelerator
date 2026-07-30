@@ -67,6 +67,7 @@ try:  # works whether imported as a package or run with scripts/ on sys.path
     from .migration_report_html import render_report_html
     from .copilot_readiness import score_copilot_readiness
     from .workbook_assessment import assess_workbook, aggregate_assessment
+    from .xml_safety import reject_entity_declarations
     from . import fetch_tds as F
 except ImportError:
     from connection_to_m import (parse_tds, extract_bundled_flatfile, extract_calcs,
@@ -85,6 +86,7 @@ except ImportError:
     from migration_report_html import render_report_html
     from copilot_readiness import score_copilot_readiness
     from workbook_assessment import assess_workbook, aggregate_assessment
+    from xml_safety import reject_entity_declarations
     import fetch_tds as F
 
 
@@ -120,6 +122,23 @@ class TableauSource(ABC):
     def describe(self):
         """A small JSON-serializable description of this source (for the report)."""
         return {"kind": type(self).__name__}
+
+
+# Every read of untrusted Tableau XML goes through these two, so a hostile document is refused
+# identically whether it arrived from a local folder, a packaged archive or a live Server pull.
+# They are functions rather than methods on ``TableauSource`` deliberately: the check then holds
+# for ANY adapter the orchestrator is handed, including one that merely matches the shape of the
+# contract without inheriting it, instead of depending on someone remembering to subclass.
+def _datasource_xml(source, ds_id):
+    """Return the ``.tds`` XML text for ``ds_id``, refusing entity-declaring documents."""
+    return reject_entity_declarations(source.read_datasource(ds_id),
+                                      source=source.asset_name(ds_id))
+
+
+def _workbook_xml(source, wb_id):
+    """Return the ``.twb`` XML text for ``wb_id``, refusing entity-declaring documents."""
+    return reject_entity_declarations(source.read_workbook(wb_id),
+                                      source=source.asset_name(wb_id))
 
 
 class LocalFilesSource(TableauSource):
@@ -839,7 +858,7 @@ def _migrate_one_datasource(source, ds_id, sm_dir, used_folders, pbip_dir=None, 
     detail = {"name": name, "source_id": str(ds_id)}
 
     try:
-        text = source.read_datasource(ds_id)
+        text = _datasource_xml(source, ds_id)
         descriptor = parse_tds(text)
     except Exception as exc:  # unreadable / malformed asset -> isolate it, keep the estate going
         detail.update(status="error", error=f"{type(exc).__name__}: {exc}")
@@ -2749,7 +2768,7 @@ def _migrate_one_workbook(source, wb_id, viz, reports_dir, used_folders, pbip_di
     detail = {"name": name, "source_id": str(wb_id)}
 
     try:
-        text = source.read_workbook(wb_id)
+        text = _workbook_xml(source, wb_id)
     except Exception as exc:
         detail.update(viz_status="error", note=f"{type(exc).__name__}: {exc}")
         return detail
@@ -2955,7 +2974,7 @@ def _second_compile_prepass(single, wb_id, approved_calc_dax, authored, output_d
     candidate.
     """
     try:
-        text = single.read_workbook(wb_id)
+        text = _workbook_xml(single, wb_id)
     except Exception as exc:
         return approved_calc_dax, {"landed": [], "count": 0,
                                    "note": f"workbook unreadable: {type(exc).__name__}: {exc}"}
@@ -3246,8 +3265,8 @@ def _resolve_plan_model(entry, route, source, sm_dir, used_folders, migrated_ind
         return None, f"no source asset resolves selector {selector!r}"
     kind, asset_id = asset
     try:
-        text = (source.read_workbook(asset_id) if kind == "workbook"
-                else source.read_datasource(asset_id))
+        text = (_workbook_xml(source, asset_id) if kind == "workbook"
+                else _datasource_xml(source, asset_id))
     except Exception as exc:  # unreadable asset -> defer with a reason, never abort
         return None, f"source {selector!r} unreadable: {type(exc).__name__}: {exc}"
 
@@ -3455,7 +3474,7 @@ def migrate_estate(source, output_dir, *, viz_stage=None, pbip=True, rebind_plan
     # hiccup must never break a migration run or omit the workbook from ``wb_details``.
     for wb_id, w in zip(wb_ids, wb_details):
         try:
-            w["assessment"] = assess_workbook(source.read_workbook(wb_id))
+            w["assessment"] = assess_workbook(_workbook_xml(source, wb_id))
         except Exception:  # pragma: no cover - assessment is a convenience over the raw facts
             pass
 
@@ -4355,7 +4374,7 @@ def scan_estate(source):
         entry = {"name": source.asset_name(wb_id), "kind": None,
                  "published_ds_name": None, "datasource_present": None}
         try:
-            signal = _workbook_binding_signal(source.read_workbook(wb_id), None)
+            signal = _workbook_binding_signal(_workbook_xml(source, wb_id), None)
         except Exception:
             signal = None
         if signal:

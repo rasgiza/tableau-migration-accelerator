@@ -36,6 +36,11 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 import xml.etree.ElementTree as ET
 
+try:
+    from .xml_safety import reject_entity_declarations
+except ImportError:
+    from xml_safety import reject_entity_declarations
+
 
 # -- minimal namespace-agnostic XML helpers (standard ElementTree idioms) ------
 def _local(tag: str) -> str:
@@ -187,7 +192,7 @@ def load_workbook_xml(path: str) -> str:
     else:
         with open(path, "rb") as f:
             data = f.read()
-    return data.decode("utf-8-sig")
+    return reject_entity_declarations(data.decode("utf-8-sig"), source=path)
 
 
 # -- core extraction -----------------------------------------------------------
