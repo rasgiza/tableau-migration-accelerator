@@ -154,7 +154,29 @@ New-Item -ItemType Directory -Force -Path $inDir | Out-Null
 $exts = @('.twb', '.twbx', '.tds', '.tdsx')
 if (Test-Path $Source -PathType Container) {
     $files = Get-ChildItem $Source -File | Where-Object { $exts -contains $_.Extension.ToLower() }
-    if (-not $files) { throw "No Tableau files ($($exts -join ', ')) found in folder '$Source'." }
+    if (-not $files) {
+        # An empty folder is a setup mistake, not a crash. `sample-workbooks/` in particular
+        # ships empty by design -- this repo does not redistribute other people's Tableau
+        # workbooks -- so this is the first thing a new user can hit. Say what to do about it
+        # and exit 2 ("refused to run"), rather than throwing a PowerShell stack trace.
+        Write-Host ""
+        Write-Host "[STOP] No Tableau files ($($exts -join ', ')) in '$Source'." -ForegroundColor Yellow
+        Write-Host ""
+        if ((Split-Path $Source -Leaf) -eq 'sample-workbooks') {
+            Write-Host "  That folder ships empty on purpose: this repo does not redistribute" -ForegroundColor Gray
+            Write-Host "  third-party Tableau workbooks. Fill it first --" -ForegroundColor Gray
+            Write-Host "  see sample-workbooks\README.md for two ways to do that." -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  Drop a .twb / .twbx / .tds / .tdsx into that folder, or point -Source" -ForegroundColor Gray
+            Write-Host "  at a single file instead." -ForegroundColor Gray
+        }
+        Write-Host ""
+        Write-Host "  Nothing to convert? Try the bundled synthetic sample:" -ForegroundColor Gray
+        Write-Host "    .\scripts\Convert-TableauToPowerBI.ps1 -Source .\sample\Superstore.twb" -ForegroundColor Gray
+        Write-Host ""
+        exit 2
+    }
     $files | Copy-Item -Destination $inDir -Force
     Write-Host "Staged $($files.Count) Tableau file(s) from folder." -ForegroundColor DarkGray
 }
